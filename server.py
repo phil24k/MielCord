@@ -36,10 +36,12 @@ HOST = os.environ.get("MIELCORD_HOST", "0.0.0.0")
 PORT = int(os.environ.get("MIELCORD_PORT", "8080"))
 SESSION_COOKIE = "mielcord_session"
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
-MAX_JSON_BYTES = 2_000_000
+MAX_JSON_BYTES = 80_000_000
 MAX_MESSAGE_CHARS = 4_000
 MAX_IMAGE_DATA_BYTES = 2_000_000
+MAX_FILE_DATA_BYTES = 50_000_000
 IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+ZIP_MIME_TYPES = {"application/zip", "application/x-zip-compressed", "multipart/x-zip"}
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.-]{3,32}$")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -243,6 +245,12 @@ def gravatar_url(email_lc: str | None, size: int = 128) -> str:
     return f"https://www.gravatar.com/avatar/{digest}?d=identicon&s={size}"
 
 
+def is_mobile_user_agent(user_agent: str | None) -> bool:
+    text = str(user_agent or "").lower()
+    markers = ("android", "iphone", "ipad", "ipod", "mobile", "windows phone")
+    return any(marker in text for marker in markers)
+
+
 def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
@@ -408,6 +416,10 @@ class Database:
                     image_name TEXT NOT NULL DEFAULT '',
                     image_mime TEXT NOT NULL DEFAULT '',
                     image_data TEXT NOT NULL DEFAULT '',
+                    file_name TEXT NOT NULL DEFAULT '',
+                    file_mime TEXT NOT NULL DEFAULT '',
+                    file_data TEXT NOT NULL DEFAULT '',
+                    file_size INTEGER NOT NULL DEFAULT 0,
                     created_at INTEGER NOT NULL,
                     edited_at INTEGER,
                     deleted_at INTEGER,
@@ -469,6 +481,14 @@ class Database:
             conn.execute("ALTER TABLE messages ADD COLUMN image_mime TEXT NOT NULL DEFAULT ''")
         if "image_data" not in message_columns:
             conn.execute("ALTER TABLE messages ADD COLUMN image_data TEXT NOT NULL DEFAULT ''")
+        if "file_name" not in message_columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN file_name TEXT NOT NULL DEFAULT ''")
+        if "file_mime" not in message_columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN file_mime TEXT NOT NULL DEFAULT ''")
+        if "file_data" not in message_columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN file_data TEXT NOT NULL DEFAULT ''")
+        if "file_size" not in message_columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN file_size INTEGER NOT NULL DEFAULT 0")
 
     def user_count(self) -> int:
         with self.transaction() as conn:
@@ -896,6 +916,29 @@ class Database:
             raise APIError(413, "Image is too large. Keep it under 2 MB.")
         return name, mime, data
 
+    def _clean_file_payload(self, attachment: Any) -> tuple[str, str, str, int]:
+        if not attachment:
+            return "", "", "", 0
+        if not isinstance(attachment, dict):
+            raise APIError(400, "Attachment payload must be an object.")
+        name = clean_name(attachment.get("name"), "attachment.zip", 180)
+        mime = str(attachment.get("mime") or "").strip().lower()
+        data = str(attachment.get("data") or "")
+        is_zip = mime in ZIP_MIME_TYPES or name.lower().endswith(".zip")
+        if not is_zip:
+            raise APIError(400, "Only ZIP attachments are supported.")
+        if not data:
+            raise APIError(400, "Attachment data is missing.")
+        try:
+            raw = base64.b64decode(data, validate=True)
+        except Exception as exc:
+            raise APIError(400, "Attachment data must be base64 encoded.") from exc
+        if len(raw) > MAX_FILE_DATA_BYTES:
+            raise APIError(413, "ZIP file is too large. Keep it under 50 MB.")
+        if not mime or mime == "application/octet-stream":
+            mime = "application/zip"
+        return name, mime, data, len(raw)
+
     def list_messages(self, channel_id: int, user_id: int, limit: int = 80, before: int | None = None) -> list[dict[str, Any]]:
         limit = max(1, min(200, int(limit or 80)))
         with self.transaction() as conn:
@@ -922,10 +965,11 @@ class Database:
             messages = [self._message_public(row) for row in reversed(rows)]
             return messages
 
-    def create_message(self, channel_id: int, user_id: int, content: str, reply_to: int | None = None, image: Any = None) -> dict[str, Any]:
+    def create_message(self, channel_id: int, user_id: int, content: str, reply_to: int | None = None, image: Any = None, attachment: Any = None) -> dict[str, Any]:
         content = str(content or "").strip()
         image_name, image_mime, image_data = self._clean_image_payload(image)
-        if not content and not image_data:
+        file_name, file_mime, file_data, file_size = self._clean_file_payload(attachment)
+        if not content and not image_data and not file_data:
             raise APIError(400, "Message cannot be empty.")
         if len(content) > MAX_MESSAGE_CHARS:
             raise APIError(400, f"Message is too long. Keep it under {MAX_MESSAGE_CHARS} characters.")
@@ -936,10 +980,10 @@ class Database:
             self._require_perm_tx(conn, int(channel["guild_id"]), user_id, "send_messages")
             cur = conn.execute(
                 """
-                INSERT INTO messages (channel_id, user_id, content, image_name, image_mime, image_data, created_at, reply_to)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO messages (channel_id, user_id, content, image_name, image_mime, image_data, file_name, file_mime, file_data, file_size, created_at, reply_to)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (channel_id, user_id, content, image_name, image_mime, image_data, now(), reply_to),
+                (channel_id, user_id, content, image_name, image_mime, image_data, file_name, file_mime, file_data, file_size, now(), reply_to),
             )
             row = conn.execute(
                 """
@@ -988,12 +1032,31 @@ class Database:
                 if not can_manage:
                     raise APIError(403, "Only message managers can permanently delete messages.")
                 conn.execute("DELETE FROM messages WHERE id = ?", (message_id,))
-                self._audit_tx(conn, guild_id, user_id, "message.permanent_delete", "message", message_id, {"had_image": bool(message["image_data"])})
+                self._audit_tx(conn, guild_id, user_id, "message.permanent_delete", "message", message_id, {"had_image": bool(message["image_data"]), "had_file": bool(message["file_data"])})
                 return {"id": message_id, "channel_id": int(channel["id"]), "guild_id": guild_id, "permanent": True}
-            conn.execute("UPDATE messages SET deleted_at = ?, content = '', image_name = NULL, image_mime = NULL, image_data = NULL WHERE id = ?", (now(), message_id))
+            conn.execute("UPDATE messages SET deleted_at = ?, content = '', image_name = '', image_mime = '', image_data = '', file_name = '', file_mime = '', file_data = '', file_size = 0 WHERE id = ?", (now(), message_id))
             if can_manage and int(message["user_id"]) != user_id:
                 self._audit_tx(conn, guild_id, user_id, "message.delete", "message", message_id, {})
             return {"id": message_id, "channel_id": int(channel["id"]), "guild_id": guild_id, "permanent": False}
+
+    def message_attachment(self, message_id: int, user_id: int) -> dict[str, Any]:
+        with self.transaction() as conn:
+            message = self._message_tx(conn, message_id)
+            channel = self._channel_tx(conn, int(message["channel_id"]))
+            self._require_perm_tx(conn, int(channel["guild_id"]), user_id, "read_message_history")
+            file_data = str(message["file_data"] or "")
+            if message["deleted_at"] is not None or not file_data:
+                raise APIError(404, "Attachment not found.")
+            try:
+                raw = base64.b64decode(file_data, validate=True)
+            except Exception as exc:
+                raise APIError(500, "Stored attachment is corrupted.") from exc
+            return {
+                "name": clean_name(message["file_name"], "attachment.zip", 180),
+                "mime": str(message["file_mime"] or "application/zip"),
+                "size": int(message["file_size"] or len(raw)),
+                "data": raw,
+            }
 
     def create_invite(self, guild_id: int, user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         with self.transaction() as conn:
@@ -1339,14 +1402,24 @@ class Database:
             "avatar_color": item.pop("avatar_color"),
             "avatar_url": gravatar_url(email_lc),
         }
-        image_data = item.pop("image_data", "")
-        image_mime = item.pop("image_mime", "")
-        image_name = item.pop("image_name", "")
+        image_data = item.pop("image_data", "") or ""
+        image_mime = item.pop("image_mime", "") or ""
+        image_name = item.pop("image_name", "") or ""
+        file_data = item.pop("file_data", "") or ""
+        file_mime = item.pop("file_mime", "") or ""
+        file_name = item.pop("file_name", "") or ""
+        file_size = int(item.pop("file_size", 0) or 0)
         item["image"] = {
             "name": image_name,
             "mime": image_mime,
             "data_url": f"data:{image_mime};base64,{image_data}",
         } if image_data else None
+        item["attachment"] = {
+            "name": file_name,
+            "mime": file_mime,
+            "size": file_size,
+            "download_url": f"/api/messages/{item['id']}/attachment",
+        } if file_data else None
         item["deleted"] = item["deleted_at"] is not None
         return item
 
@@ -1373,6 +1446,7 @@ class WSClient:
     voice_guild_id: int | None = None
     media_state: dict[str, Any] = field(default_factory=lambda: {"muted": False, "camera": False, "screen": False})
     ghost: bool = False
+    mobile: bool = False
 
     @property
     def user_id(self) -> int:
@@ -1394,7 +1468,8 @@ class Hub:
     def register(self, client: WSClient) -> None:
         with self.lock:
             self.clients.add(client)
-        client.send("hello", {"user": client.user, "guild_ids": sorted(client.guild_ids), "voice": self.voice_presence_for_guilds(client.guild_ids)})
+        mobile_by_guild = {str(guild_id): sorted(self.mobile_users(guild_id)) for guild_id in client.guild_ids}
+        client.send("hello", {"user": client.user, "guild_ids": sorted(client.guild_ids), "voice": self.voice_presence_for_guilds(client.guild_ids), "mobile_user_ids": mobile_by_guild})
         self.broadcast_presence(client.user_id, "online", client.guild_ids)
 
     def unregister(self, client: WSClient) -> None:
@@ -1403,6 +1478,8 @@ class Hub:
         self.leave_voice(client, restore_visibility=False)
         if not self._is_user_visible_online(client.user_id):
             self.broadcast_presence(client.user_id, "offline", client.guild_ids)
+        else:
+            self.broadcast_presence(client.user_id, "online", client.guild_ids)
 
     def _is_user_online(self, user_id: int) -> bool:
         with self.lock:
@@ -1415,6 +1492,10 @@ class Hub:
     def online_users(self, guild_id: int) -> set[int]:
         with self.lock:
             return {c.user_id for c in self.clients if guild_id in c.guild_ids and not c.ghost}
+
+    def mobile_users(self, guild_id: int) -> set[int]:
+        with self.lock:
+            return {c.user_id for c in self.clients if guild_id in c.guild_ids and not c.ghost and c.mobile}
 
     def update_user(self, user_id: int, user: dict[str, Any]) -> None:
         with self.lock:
@@ -1440,7 +1521,7 @@ class Hub:
 
     def broadcast_presence(self, user_id: int, status: str, guild_ids: set[int]) -> None:
         for guild_id in guild_ids:
-            self.broadcast_guild(guild_id, "presence:update", {"user_id": user_id, "status": status})
+            self.broadcast_guild(guild_id, "presence:update", {"user_id": user_id, "status": status, "mobile": user_id in self.mobile_users(guild_id)})
 
     def broadcast_guild(self, guild_id: int, event: str, payload: dict[str, Any], exclude: WSClient | None = None) -> None:
         stale: list[WSClient] = []
@@ -1464,7 +1545,9 @@ class Hub:
     def handle_client_event(self, client: WSClient, message: dict[str, Any]) -> None:
         event = message.get("event")
         payload = message.get("payload") or {}
-        if event == "typing:start":
+        if event == "ping":
+            client.send("pong", {"t": payload.get("t"), "at": now()})
+        elif event == "typing:start":
             channel_id = int(payload.get("channel_id") or 0)
             guild_id = self.db.guild_id_for_channel(channel_id)
             self.broadcast_guild(
@@ -1736,6 +1819,9 @@ class MielcordHandler(BaseHTTPRequestHandler):
                 return
             self.handle_websocket()
             return
+        if parsed.path.startswith("/api/messages/") and parsed.path.endswith("/attachment"):
+            self.handle_message_attachment(parsed)
+            return
         if parsed.path.startswith("/api/"):
             self.handle_api("GET", parsed)
             return
@@ -1765,6 +1851,31 @@ class MielcordHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         self.handle_api("DELETE", urllib.parse.urlparse(self.path))
+
+    def handle_message_attachment(self, parsed: urllib.parse.ParseResult) -> None:
+        try:
+            self.enforce_country_access()
+            user = self.require_user()
+            segments = [urllib.parse.unquote(part) for part in parsed.path.strip("/").split("/") if part]
+            if len(segments) != 4 or segments[:2] != ["api", "messages"] or segments[3] != "attachment":
+                raise APIError(404, "Attachment not found.")
+            attachment = self.app.db.message_attachment(int(segments[2]), int(user["id"]))
+            body = attachment["data"]
+            filename = str(attachment["name"] or "attachment.zip").replace("\\", "_").replace('"', "'")
+            encoded = urllib.parse.quote(filename)
+            self.send_response(200)
+            self.send_header("Content-Type", attachment["mime"])
+            self.send_header("Content-Length", str(len(body)))
+            disposition = f"attachment; filename=\"{filename}\"; filename*=UTF-8''{encoded}"
+            self.send_header("Content-Disposition", disposition)
+            self.send_header("Cache-Control", "private, no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except APIError as exc:
+            self.send_json(exc.status, {"error": exc.message})
+        except Exception as exc:
+            traceback.print_exc()
+            self.send_json(500, {"error": f"Internal server error: {exc}"})
 
     def handle_api(self, method: str, parsed: urllib.parse.ParseResult) -> None:
         try:
@@ -1840,6 +1951,7 @@ class MielcordHandler(BaseHTTPRequestHandler):
                 if method == "GET":
                     snapshot = self.app.db.guild_snapshot(guild_id, user_id)
                     snapshot["online_user_ids"] = sorted(self.app.hub.online_users(guild_id))
+                    snapshot["mobile_user_ids"] = sorted(self.app.hub.mobile_users(guild_id))
                     snapshot["voice"] = self.app.hub.voice_presence(guild_id)
                     return snapshot, None
                 if method == "PATCH":
@@ -1916,7 +2028,7 @@ class MielcordHandler(BaseHTTPRequestHandler):
                 return {"messages": self.app.db.list_messages(channel_id, user_id, limit, before)}, None
             if method == "POST":
                 self.app.limit("message_per_user", str(user_id), "You are sending messages too quickly.")
-                message = self.app.db.create_message(channel_id, user_id, payload.get("content", ""), payload.get("reply_to"), payload.get("image"))
+                message = self.app.db.create_message(channel_id, user_id, payload.get("content", ""), payload.get("reply_to"), payload.get("image"), payload.get("attachment"))
                 guild_id = self.app.db.guild_id_for_channel(channel_id)
                 self.app.hub.broadcast_guild(guild_id, "message:create", message)
                 return {"message": message}, None
@@ -2073,7 +2185,7 @@ class MielcordHandler(BaseHTTPRequestHandler):
         self.send_header("Sec-WebSocket-Accept", accept)
         self.end_headers()
 
-        client = WSClient(self, user, self.app.db.guilds_for_user(int(user["id"])))
+        client = WSClient(self, user, self.app.db.guilds_for_user(int(user["id"])), mobile=is_mobile_user_agent(self.headers.get("User-Agent")))
         self.app.hub.register(client)
         try:
             while True:
