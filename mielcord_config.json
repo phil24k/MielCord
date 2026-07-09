@@ -1,0 +1,40 @@
+{
+  "guild_name": "Mielcord Central",
+  "guild_description": "The shared community server on this Mielcord host.",
+  "admin_usernames": [
+    "admin",
+    "phil24k"
+  ],
+  "registration_enabled": true,
+  "rate_limits": {
+    "register_per_ip": {
+      "limit": 5,
+      "window_seconds": 600
+    },
+    "login_per_ip": {
+      "limit": 30,
+      "window_seconds": 300
+    },
+    "login_per_account": {
+      "limit": 8,
+      "window_seconds": 300
+    },
+    "message_per_user": {
+      "limit": 12,
+      "window_seconds": 8
+    }
+  },
+  "private_mode_enabled": true,
+  "private_mode_password": "alain",
+  "country_restriction_enabled": false,
+  "allowed_country_codes": [
+    "CA"
+  ],
+  "country_restriction_allow_private": true,
+  "country_headers": [
+    "CF-IPCountry",
+    "X-Country-Code",
+    "X-AppEngine-Country",
+    "X-Vercel-IP-Country"
+  ]
+}
