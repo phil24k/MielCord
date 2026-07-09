@@ -1,5 +1,5 @@
 const root = document.getElementById("root");
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "2.1.0";
 
 function loadClientBool(key, fallback) {
   try {
@@ -16,6 +16,66 @@ function saveClientBool(key, value) {
   } catch {}
 }
 
+function loadClientJson(key, fallback) {
+  try {
+    const value = localStorage.getItem(`mielcord:${key}`);
+    return value ? { ...fallback, ...JSON.parse(value) } : { ...fallback };
+  } catch {
+    return { ...fallback };
+  }
+}
+
+function saveClientJson(key, value) {
+  try {
+    localStorage.setItem(`mielcord:${key}`, JSON.stringify(value));
+  } catch {}
+}
+
+const DEFAULT_THEME = {
+  bg: "#171615",
+  panel: "#22201d",
+  panel2: "#2d2924",
+  panel3: "#37312a",
+  line: "#4a4339",
+  text: "#f4efe6",
+  muted: "#b8aa98",
+  honey: "#d99a23",
+  teal: "#2a9d8f",
+  berry: "#c44569",
+  danger: "#e15b4f",
+  ok: "#5c946e"
+};
+
+const THEME_CSS_VARS = {
+  bg: "--bg",
+  panel: "--panel",
+  panel2: "--panel-2",
+  panel3: "--panel-3",
+  line: "--line",
+  text: "--text",
+  muted: "--muted",
+  honey: "--honey",
+  teal: "--teal",
+  berry: "--berry",
+  danger: "--danger",
+  ok: "--ok"
+};
+
+const THEME_CONTROLS = [
+  ["bg", "Background"],
+  ["panel", "Main panels"],
+  ["panel2", "Raised panels"],
+  ["panel3", "Buttons"],
+  ["line", "Borders"],
+  ["text", "Text"],
+  ["muted", "Muted text"],
+  ["honey", "Honey accent"],
+  ["teal", "Call accent"],
+  ["berry", "Berry accent"],
+  ["danger", "Danger"],
+  ["ok", "Success"]
+];
+
 const state = {
   user: null,
   appVersion: APP_VERSION,
@@ -27,6 +87,7 @@ const state = {
   clientSettings: {
     ringAlerts: loadClientBool("ringAlerts", true)
   },
+  clientTheme: loadClientJson("theme", DEFAULT_THEME),
   guilds: [],
   snapshot: null,
   activeGuildId: null,
@@ -38,6 +99,7 @@ const state = {
   searchResults: [],
   editingMessageId: null,
   attachedFile: null,
+  attachedPreviewUrl: "",
   audioContext: null,
   voicePresence: new Map(),
   peerSettings: new Map(),
@@ -56,6 +118,7 @@ const state = {
   wsReconnect: null,
   wsHeartbeat: null,
   wsLastPong: 0,
+  resizeRender: null,
   voice: {
     channelId: null,
     channelName: "",
@@ -98,6 +161,7 @@ const icons = {
   login: '<svg viewBox="0 0 24 24"><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/><path d="M14 4h4a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3h-4"/></svg>',
   userPlus: '<svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6"/><path d="M22 11h-6"/></svg>',
   settings: '<svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.18.38.5.7.88.88.33.15.7.2 1.1.2H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51.92Z"/></svg>',
+  brush: '<svg viewBox="0 0 24 24"><path d="m9.06 11.9 6.01-6.02a2.1 2.1 0 0 1 2.97 0l.08.08a2.1 2.1 0 0 1 0 2.97l-6.02 6.01"/><path d="M7 14c-2 0-3 1.5-3 3.5 0 1.4-1 2.5-2 2.5 2.5 1 6 .5 7.7-1.2 1.5-1.5 1.4-3.7-.1-4.8A4 4 0 0 0 7 14Z"/><path d="m14 6 4 4"/></svg>',
   logout: '<svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>',
   hash: '<svg viewBox="0 0 24 24"><path d="M4 9h16"/><path d="M4 15h16"/><path d="M10 3 8 21"/><path d="m16 3-2 18"/></svg>',
   voice: '<svg viewBox="0 0 24 24"><path d="M12 3a4 4 0 0 0-4 4v5a4 4 0 0 0 8 0V7a4 4 0 0 0-4-4Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg>',
@@ -129,6 +193,34 @@ function icon(name) {
 function iconText(name, text) {
   return `${icon(name)}<span>${escapeHtml(text)}</span>`;
 }
+
+function applyClientTheme(theme = state.clientTheme) {
+  const merged = { ...DEFAULT_THEME, ...(theme || {}) };
+  for (const [key, cssVar] of Object.entries(THEME_CSS_VARS)) {
+    document.documentElement.style.setProperty(cssVar, merged[key]);
+  }
+}
+
+function setThemeColor(key, value) {
+  if (!THEME_CSS_VARS[key] || !/^#[0-9a-f]{6}$/i.test(value || "")) return;
+  state.clientTheme = { ...state.clientTheme, [key]: value };
+  applyClientTheme(state.clientTheme);
+  saveClientJson("theme", state.clientTheme);
+}
+
+function resetClientTheme() {
+  state.clientTheme = { ...DEFAULT_THEME };
+  applyClientTheme(state.clientTheme);
+  saveClientJson("theme", state.clientTheme);
+  renderThemeSettingsOnly();
+}
+
+function renderThemeSettingsOnly() {
+  const panel = document.querySelector("[data-theme-settings]");
+  if (panel) panel.innerHTML = renderThemeControls();
+}
+
+applyClientTheme(state.clientTheme);
 
 function getAudioContext() {
   const AudioCtor = window.AudioContext || window.webkitAudioContext;
@@ -220,6 +312,53 @@ async function readComposerFile(file) {
   throw new Error("Attach a PNG, JPEG, GIF, WebP, or ZIP file.");
 }
 
+function revokeAttachmentPreviewUrl() {
+  if (!state.attachedPreviewUrl) return;
+  const urlApi = window.URL || window.webkitURL;
+  try { urlApi?.revokeObjectURL(state.attachedPreviewUrl); } catch {}
+  state.attachedPreviewUrl = "";
+}
+
+function setAttachedFile(file) {
+  revokeAttachmentPreviewUrl();
+  state.attachedFile = file || null;
+  const urlApi = window.URL || window.webkitURL;
+  if (state.attachedFile && IMAGE_MIME_TYPES.includes(state.attachedFile.type) && urlApi?.createObjectURL) {
+    state.attachedPreviewUrl = urlApi.createObjectURL(state.attachedFile);
+  }
+  renderAttachmentPreviewOnly();
+}
+
+function clearAttachedFile(input = null) {
+  revokeAttachmentPreviewUrl();
+  state.attachedFile = null;
+  const field = input || document.querySelector('.composer input[name="attachment"]');
+  if (field) field.value = "";
+  renderAttachmentPreviewOnly();
+}
+
+function renderAttachmentPreview() {
+  const file = state.attachedFile;
+  if (!file) return "";
+  const imagePreview = IMAGE_MIME_TYPES.includes(file.type) && state.attachedPreviewUrl;
+  const label = imagePreview ? "Image" : (isZipFile(file) ? "ZIP file" : "File");
+  return `
+    <div class="attachment-preview ${imagePreview ? "with-image" : ""}">
+      ${imagePreview ? `<img src="${escapeHtml(state.attachedPreviewUrl)}" alt="${escapeHtml(file.name)}">` : `<div class="attachment-preview-icon">${icon("file")}</div>`}
+      <div>
+        <strong>${escapeHtml(file.name)}</strong>
+        <span>${label} - ${formatFileSize(file.size || 0)}</span>
+      </div>
+      <button class="icon-button" type="button" data-action="clearAttachment" title="Remove attachment">${icon("close")}</button>
+    </div>
+  `;
+}
+
+function renderAttachmentPreviewOnly() {
+  const slot = document.querySelector("[data-attachment-preview]");
+  if (slot) slot.innerHTML = renderAttachmentPreview();
+}
+
 
 function streamConstraints() {
   const options = {
@@ -292,10 +431,10 @@ function startSpeakingMonitor(userId, stream, muted = () => false) {
     return;
   }
   const analyser = ctx.createAnalyser();
-  analyser.fftSize = 512;
+  analyser.fftSize = 1024;
   source.connect(analyser);
   const samples = new Uint8Array(analyser.fftSize);
-  const monitor = { stream, source, analyser, samples, muted, frame: null, hot: 0, silent: 0 };
+  const monitor = { stream, source, analyser, samples, muted, frame: null, hot: 0, silent: 0, level: 0 };
   state.speakingMonitors.set(key, monitor);
 
   const tick = () => {
@@ -307,8 +446,11 @@ function startSpeakingMonitor(userId, stream, muted = () => false) {
       const delta = value - 128;
       sum += delta * delta;
     }
-    const level = Math.sqrt(sum / samples.length);
-    const active = liveAudio && !monitor.muted() && level > 7;
+    const rawLevel = Math.sqrt(sum / samples.length);
+    monitor.level = monitor.level ? monitor.level * 0.82 + rawLevel * 0.18 : rawLevel;
+    const alreadySpeaking = state.speaking.has(key);
+    const threshold = alreadySpeaking ? 7.5 : 11.5;
+    const active = liveAudio && !monitor.muted() && monitor.level > threshold;
     if (active) {
       monitor.hot += 1;
       monitor.silent = 0;
@@ -316,8 +458,8 @@ function startSpeakingMonitor(userId, stream, muted = () => false) {
       monitor.silent += 1;
       monitor.hot = 0;
     }
-    if (monitor.hot >= 2) setSpeaking(key, true);
-    if (monitor.silent >= 8) setSpeaking(key, false);
+    if (monitor.hot >= 5) setSpeaking(key, true);
+    if (monitor.silent >= 24) setSpeaking(key, false);
     monitor.frame = requestAnimationFrame(tick);
   };
   monitor.frame = requestAnimationFrame(tick);
@@ -457,7 +599,7 @@ function renderLoading() {
     <main class="auth-screen">
       <section class="auth-card compact">
         <div class="brand-lockup">
-          <div class="brand-mark">M</div>
+          <img class="brand-logo" src="/mielcord_logo_st.png" alt="">
           <div>
             <h1>Mielcord</h1>
             <p>Loading...</p>
@@ -490,7 +632,7 @@ function renderAuth() {
     <main class="auth-screen">
       <section class="auth-card">
         <div class="brand-lockup">
-          <div class="brand-mark">M</div>
+          <img class="brand-logo" src="/mielcord_logo_st.png" alt="">
           <div>
             <h1>Mielcord</h1>
             <p>${state.hostConfig.privateMode ? "Private host" : "Self-hosted team chat"}</p>
@@ -553,9 +695,12 @@ function renderChannelPane() {
   return `
     <aside class="channel-pane">
       <header class="server-header">
-        <div>
-          <h2>${escapeHtml(guild?.name || "Mielcord")}</h2>
-          <p>${escapeHtml(guild?.description || state.user.username)}</p>
+        <div class="server-title">
+          <img class="server-logo" src="/mielcord_logo_st.png" alt="">
+          <div>
+            <h2>${escapeHtml(guild?.name || "Mielcord")}</h2>
+            <p>${escapeHtml(guild?.description || state.user.username)}</p>
+          </div>
         </div>
         <button class="icon-button" data-open-modal="guildSettings" title="Guild settings">${icon("settings")}</button>
       </header>
@@ -615,9 +760,11 @@ function renderVoiceRoster(channelId) {
       ${users.map((entry) => `
         <div class="voice-roster-user ${state.speaking.has(Number(entry.user.id)) ? "speaking" : ""}" data-user-id="${entry.user.id}" data-peer-user-id="${entry.user.id}">
           ${renderAvatar(entry.user, "mini")}
-          <span>${escapeHtml(entry.user.display_name || entry.user.username)}</span>
-          ${entry.state?.muted ? icon("micOff") : ""}
-          ${entry.state?.screen ? icon("screen") : ""}
+          <span class="voice-roster-name">${escapeHtml(entry.user.display_name || entry.user.username)}</span>
+          <span class="voice-roster-icons">
+            ${entry.state?.muted ? icon("micOff") : ""}
+            ${entry.state?.screen ? icon("screen") : ""}
+          </span>
         </div>
       `).join("")}
     </div>
@@ -662,6 +809,7 @@ function renderUserDock() {
         <strong>${escapeHtml(state.user?.display_name || state.user?.username || "User")}</strong>
         <span>@${escapeHtml(state.user?.username || "mielcord")}</span>
       </div>
+      <button class="icon-button" data-open-modal="themeSettings" title="Client colors">${icon("brush")}</button>
       <button class="icon-button" data-open-modal="profileSettings" title="User settings">${icon("settings")}</button>
     </section>
   `;
@@ -688,6 +836,7 @@ function renderChatPane() {
           ${state.messages.map(renderMessage).join("") || `<div class="empty-state">No messages yet</div>`}
         </section>
         <div class="typing-line">${renderTypingLine()}</div>
+        <div class="attachment-preview-slot" data-attachment-preview>${renderAttachmentPreview()}</div>
         <form class="composer" data-action="sendMessage">
           ${state.editingMessageId ? `<button type="button" data-action="cancelEdit">Cancel</button>` : ""}
           <label class="attach-button" title="Attach image or ZIP">
@@ -696,7 +845,6 @@ function renderChatPane() {
           </label>
           <textarea name="content" rows="1" maxlength="4000" ${editable ? "" : "disabled"} placeholder="${editable ? "Message" : "Read only"}"></textarea>
           <button class="primary send-button" type="submit" ${editable ? "" : "disabled"}>${state.editingMessageId ? iconText("save", "Save") : iconText("send", "Send")}</button>
-          <div class="attachment-name" data-attachment-name>${state.attachedFile ? escapeHtml(state.attachedFile.name) : ""}</div>
         </form>
       `}
     </main>
@@ -755,16 +903,34 @@ function renderSearchResults() {
   `;
 }
 
+function videoGridLayout(count) {
+  const total = Math.max(1, Number(count) || 1);
+  const shell = document.querySelector(".app-shell");
+  const pane = document.querySelector(".chat-pane") || shell || document.documentElement;
+  const channelPane = document.querySelector(".channel-pane");
+  const paneWidth = pane.clientWidth || Math.max(1, window.innerWidth - (channelPane?.clientWidth || 0));
+  const paneHeight = pane.clientHeight || window.innerHeight;
+  const reserved = 112;
+  const stageWidth = Math.max(1, paneWidth - 28);
+  const stageHeight = Math.max(1, paneHeight - reserved);
+  const ratio = Math.max(0.45, Math.min(3.2, stageWidth / stageHeight));
+  const cols = Math.max(1, Math.min(total, Math.ceil(Math.sqrt(total * ratio))));
+  const rows = Math.max(1, Math.ceil(total / cols));
+  return { cols, rows };
+}
+
 function renderVoiceStage() {
   if (!state.voice.channelId) return "";
   const peers = [...state.voice.peers.values()];
+  const total = peers.length + (state.voice.ghost ? 0 : 1);
+  const layout = videoGridLayout(total || 1);
   return `
     <section class="voice-stage ${state.voice.ghost ? "ghost-stage" : ""}">
       <div class="stage-header">
         <strong>${escapeHtml(state.voice.channelName)}</strong>
         <span>${state.voice.ghost ? `${peers.length} observed` : `${peers.length + 1} connected`}</span>
       </div>
-      <div class="video-grid">
+      <div class="video-grid" style="--video-cols:${layout.cols}; --video-rows:${layout.rows};">
         ${state.voice.ghost ? "" : renderVideoTile("local", state.user, {
           muted: state.voice.muted,
           camera: state.voice.camera,
@@ -993,6 +1159,37 @@ function renderAdminPanel(guild, members) {
 }
 
 
+function renderThemeControls() {
+  return `
+    <div class="theme-grid">
+      ${THEME_CONTROLS.map(([key, label]) => `
+        <label class="theme-color-row">
+          <span>${escapeHtml(label)}</span>
+          <input type="color" value="${escapeHtml(state.clientTheme[key] || DEFAULT_THEME[key])}" data-theme-color="${key}">
+        </label>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderThemeSettingsModal() {
+  return `
+    <section class="modal-card theme-modal">
+      <header class="settings-header">
+        <div>
+          <h2>Client colors</h2>
+          <p>Saved on this browser</p>
+        </div>
+        <button class="icon-button" data-close-modal type="button">${icon("close")}</button>
+      </header>
+      <div data-theme-settings>${renderThemeControls()}</div>
+      <div class="theme-actions">
+        <button class="danger" type="button" data-action="resetTheme">${iconText("brush", "Reset colors")}</button>
+      </div>
+    </section>
+  `;
+}
+
 function renderProfileSettingsModal() {
   const micTesting = !!state.deviceTest.micStream;
   const cameraTesting = !!state.deviceTest.cameraStream;
@@ -1075,6 +1272,7 @@ function openModal(kind) {
   const forms = {
     guildSettings: renderGuildSettingsModal(),
     profileSettings: renderProfileSettingsModal(),
+    themeSettings: renderThemeSettingsModal(),
     createText: `
       <form class="modal-card" data-action="createChannel">
         <h2>Text channel</h2>
@@ -1413,6 +1611,8 @@ document.addEventListener("click", async (event) => {
     state.searchResults = [];
     render();
   }
+  if (action === "clearAttachment") clearAttachedFile();
+  if (action === "resetTheme") resetClientTheme();
   if (action === "cancelEdit") {
     state.editingMessageId = null;
     render();
@@ -1460,6 +1660,12 @@ document.addEventListener("click", (event) => {
   if (event.target.closest("[data-close-modal], .modal-close")) closeModal();
 });
 
+window.addEventListener("resize", () => {
+  if (!state.voice.channelId || state.callCollapsed) return;
+  clearTimeout(state.resizeRender);
+  state.resizeRender = setTimeout(render, 120);
+});
+
 document.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.target;
@@ -1492,9 +1698,23 @@ root.addEventListener("input", (event) => {
 
 document.addEventListener("change", (event) => {
   if (event.target.matches('.composer input[name="attachment"]')) {
-    state.attachedFile = event.target.files?.[0] || null;
-    const name = document.querySelector("[data-attachment-name]");
-    if (name) name.textContent = state.attachedFile?.name || "";
+    const file = event.target.files?.[0] || null;
+    if (file && !IMAGE_MIME_TYPES.includes(file.type) && !isZipFile(file)) {
+      notice("Attach a PNG, JPEG, GIF, WebP, or ZIP file.", "error");
+      clearAttachedFile(event.target);
+      return;
+    }
+    if (file && IMAGE_MIME_TYPES.includes(file.type) && file.size > 2_000_000) {
+      notice("Image is too large. Keep it under 2 MB.", "error");
+      clearAttachedFile(event.target);
+      return;
+    }
+    if (file && isZipFile(file) && file.size > 50_000_000) {
+      notice("ZIP file is too large. Keep it under 50 MB.", "error");
+      clearAttachedFile(event.target);
+      return;
+    }
+    setAttachedFile(file);
   }
   if (event.target.matches('[data-action="streamQuality"]')) {
     state.streamQuality = event.target.value;
@@ -1506,6 +1726,9 @@ document.addEventListener("change", (event) => {
 });
 
 document.addEventListener("input", (event) => {
+  if (event.target.matches('[data-theme-color]')) {
+    setThemeColor(event.target.dataset.themeColor, event.target.value);
+  }
   if (event.target.matches('[data-peer-volume]')) {
     const userId = Number(event.target.dataset.peerVolume);
     peerSettings(userId).volume = Number(event.target.value) / 100;
@@ -1680,7 +1903,7 @@ async function deleteChannel(channelId) {
 async function sendMessage(form) {
   const textarea = form.elements.content;
   const content = textarea.value.trim();
-  const file = form.elements.attachment?.files?.[0] || null;
+  const file = state.attachedFile || form.elements.attachment?.files?.[0] || null;
   if ((!content && !file) || !state.activeChannelId) return;
   if (state.editingMessageId) {
     await api(`/api/messages/${state.editingMessageId}`, { method: "PATCH", body: { content } });
@@ -1691,10 +1914,7 @@ async function sendMessage(form) {
   }
   textarea.value = "";
   textarea.style.height = "auto";
-  if (form.elements.attachment) form.elements.attachment.value = "";
-  state.attachedFile = null;
-  const name = document.querySelector("[data-attachment-name]");
-  if (name) name.textContent = "";
+  clearAttachedFile(form.elements.attachment);
 }
 
 async function deleteMessage(messageId, permanent = false) {
