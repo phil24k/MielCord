@@ -1,4 +1,7 @@
-# MielCord
+# MielCord 
+
+<img width="2134" height="2134" alt="mielcord_logo_st" src="https://github.com/user-attachments/assets/2a4689fd-6be2-4e75-a9f0-0e0ccaea0884" />
+
 
 **A self-hostable, privacy-first communication platform for you and your friends.**
 
