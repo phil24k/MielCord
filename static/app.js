@@ -33,10 +33,11 @@ const state = {
   activeChannelId: null,
   messages: [],
   online: new Set(),
+  mobileOnline: new Set(),
   typing: new Map(),
   searchResults: [],
   editingMessageId: null,
-  attachedImage: null,
+  attachedFile: null,
   audioContext: null,
   voicePresence: new Map(),
   peerSettings: new Map(),
@@ -53,6 +54,8 @@ const state = {
   },
   ws: null,
   wsReconnect: null,
+  wsHeartbeat: null,
+  wsLastPong: 0,
   voice: {
     channelId: null,
     channelName: "",
@@ -114,6 +117,8 @@ const icons = {
   volume: '<svg viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a10 10 0 0 1 0 14"/></svg>',
   bell: '<svg viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 7 3 9H3c0-2 3-2 3-9"/><path d="M10.3 21a2 2 0 0 0 3.4 0"/><path d="M4 2 2 4"/><path d="M22 4l-2-2"/></svg>',
   ghost: '<svg viewBox="0 0 24 24"><path d="M9 10h.01"/><path d="M15 10h.01"/><path d="M12 2a7 7 0 0 0-7 7v11l2-1.5L9 20l3-2 3 2 2-1.5 2 1.5V9a7 7 0 0 0-7-7Z"/></svg>',
+  file: '<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg>',
+  phone: '<svg viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>',
   trash: '<svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/></svg>'
 };
 
@@ -178,19 +183,41 @@ function requireMedia(kind) {
   return devices;
 }
 
-async function readImageFile(file) {
-  if (!file) return null;
-  const allowed = ["image/png", "image/jpeg", "image/gif", "image/webp"];
-  if (!allowed.includes(file.type)) throw new Error("Images must be PNG, JPEG, GIF, or WebP.");
-  if (file.size > 2_000_000) throw new Error("Image is too large. Keep it under 2 MB.");
+const IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+const ZIP_MIME_TYPES = ["application/zip", "application/x-zip-compressed", "multipart/x-zip"];
+
+function isZipFile(file) {
+  return ZIP_MIME_TYPES.includes(file.type) || String(file.name || "").toLowerCase().endsWith(".zip");
+}
+
+async function readFileBase64(file, errorLabel) {
   const dataUrl = await new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result || ""));
-    reader.onerror = () => reject(new Error("Could not read image."));
+    reader.onerror = () => reject(new Error(`Could not read ${errorLabel}.`));
     reader.readAsDataURL(file);
   });
   const comma = dataUrl.indexOf(",");
-  return { name: file.name, mime: file.type, data: dataUrl.slice(comma + 1) };
+  return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+}
+
+async function readComposerFile(file) {
+  if (!file) return { image: null, attachment: null };
+  if (IMAGE_MIME_TYPES.includes(file.type)) {
+    if (file.size > 2_000_000) throw new Error("Image is too large. Keep it under 2 MB.");
+    return {
+      image: { name: file.name, mime: file.type, data: await readFileBase64(file, "image") },
+      attachment: null
+    };
+  }
+  if (isZipFile(file)) {
+    if (file.size > 50_000_000) throw new Error("ZIP file is too large. Keep it under 50 MB.");
+    return {
+      image: null,
+      attachment: { name: file.name, mime: file.type || "application/zip", size: file.size, data: await readFileBase64(file, "ZIP file") }
+    };
+  }
+  throw new Error("Attach a PNG, JPEG, GIF, WebP, or ZIP file.");
 }
 
 
@@ -198,7 +225,10 @@ function streamConstraints() {
   const options = {
     "720p": { width: 1280, height: 720, frameRate: 30 },
     "1080p": { width: 1920, height: 1080, frameRate: 60 },
-    "1440p": { width: 2560, height: 1440, frameRate: 60 }
+    "1440p": { width: 2560, height: 1440, frameRate: 60 },
+    "4k": { width: 3840, height: 2160, frameRate: 60 },
+    "5k": { width: 5120, height: 2880, frameRate: 60 },
+    "source": { width: 7680, height: 4320, frameRate: 60 }
   };
   const picked = options[state.streamQuality] || options["1080p"];
   return {
@@ -215,11 +245,17 @@ function peerSettings(userId) {
 }
 
 function applyPeerMediaSettings(userId) {
-  const video = document.getElementById(`video-peer-${userId}`);
-  if (!video) return;
   const settings = peerSettings(userId);
-  video.volume = settings.volume;
-  video.muted = settings.muted;
+  const video = document.getElementById(`video-peer-${userId}`);
+  if (video) {
+    video.volume = 0;
+    video.muted = true;
+  }
+  const audio = document.getElementById(`audio-peer-${userId}`);
+  if (audio) {
+    audio.volume = settings.volume;
+    audio.muted = settings.muted;
+  }
 }
 
 
@@ -590,6 +626,7 @@ function renderVoiceRoster(channelId) {
 
 function renderVoiceDock() {
   const inVoice = !!state.voice.channelId;
+  const ringable = inVoice && !state.voice.ghost ? ringableMembers() : [];
   return `
     <section class="voice-dock ${inVoice ? "connected" : ""} ${state.voice.ghost ? "ghost" : ""}">
       <div>
@@ -604,6 +641,15 @@ function renderVoiceDock() {
         `}
         <button class="icon-button danger" data-action="leaveVoice" title="Leave">${icon("phoneOff")}</button>
       </div>
+      ${inVoice && !state.voice.ghost ? `
+        <div class="dock-ring">
+          <select class="ring-select" data-ring-target title="Ring user" ${ringable.length ? "" : "disabled"}>
+            <option value="">${ringable.length ? "Ring user" : "No one to ring"}</option>
+            ${ringable.map((member) => `<option value="${member.user_id}">${escapeHtml(member.nickname || member.display_name || member.username)}</option>`).join("")}
+          </select>
+          <button class="icon-button" data-action="ringUser" title="Ring selected user" ${ringable.length ? "" : "disabled"}>${icon("bell")}</button>
+        </div>
+      ` : ""}
     </section>
   `;
 }
@@ -617,7 +663,6 @@ function renderUserDock() {
         <span>@${escapeHtml(state.user?.username || "mielcord")}</span>
       </div>
       <button class="icon-button" data-open-modal="profileSettings" title="User settings">${icon("settings")}</button>
-      <button class="icon-button danger" data-action="logout" title="Log out">${icon("logout")}</button>
     </section>
   `;
 }
@@ -633,34 +678,27 @@ function ringableMembers() {
 function renderChatPane() {
   const channel = activeChannel();
   const editable = hasPermission("send_messages") && channel?.type === "text";
+  const callExpanded = !!state.voice.channelId && !state.callCollapsed;
   return `
-    <main class="chat-pane">
-      <header class="chat-header">
-        <div>
-          <h2>${channel ? `${channel.type === "text" ? "#" : ">"} ${escapeHtml(channel.name)}` : "Mielcord"}</h2>
-          <p>${escapeHtml(channel?.topic || "Ready")}</p>
-        </div>
-        <form class="search-box" data-action="search">
-          <input name="query" placeholder="Search" autocomplete="off">
-          <button type="submit">Go</button>
-        </form>
-      </header>
+    <main class="chat-pane ${callExpanded ? "call-only" : ""}">
       ${state.voice.channelId ? renderCallWindow() : ""}
-      ${state.searchResults.length ? renderSearchResults() : ""}
-      <section class="message-list" id="messageList">
-        ${state.messages.map(renderMessage).join("") || `<div class="empty-state">No messages yet</div>`}
-      </section>
-      <div class="typing-line">${renderTypingLine()}</div>
-      <form class="composer" data-action="sendMessage">
-        ${state.editingMessageId ? `<button type="button" data-action="cancelEdit">Cancel</button>` : ""}
-        <label class="attach-button" title="Attach image">
-          ${icon("image")}
-          <input name="image" type="file" accept="image/png,image/jpeg,image/gif,image/webp" ${editable ? "" : "disabled"}>
-        </label>
-        <textarea name="content" rows="1" maxlength="4000" ${editable ? "" : "disabled"} placeholder="${editable ? "Message" : "Read only"}"></textarea>
-        <button class="primary send-button" type="submit" ${editable ? "" : "disabled"}>${state.editingMessageId ? iconText("save", "Save") : iconText("send", "Send")}</button>
-        <div class="attachment-name" data-attachment-name>${state.attachedImage ? escapeHtml(state.attachedImage.name) : ""}</div>
-      </form>
+      ${callExpanded ? "" : `
+        ${state.searchResults.length ? renderSearchResults() : ""}
+        <section class="message-list" id="messageList">
+          ${state.messages.map(renderMessage).join("") || `<div class="empty-state">No messages yet</div>`}
+        </section>
+        <div class="typing-line">${renderTypingLine()}</div>
+        <form class="composer" data-action="sendMessage">
+          ${state.editingMessageId ? `<button type="button" data-action="cancelEdit">Cancel</button>` : ""}
+          <label class="attach-button" title="Attach image or ZIP">
+            ${icon("file")}
+            <input name="attachment" type="file" accept="image/png,image/jpeg,image/gif,image/webp,.zip,application/zip,application/x-zip-compressed" ${editable ? "" : "disabled"}>
+          </label>
+          <textarea name="content" rows="1" maxlength="4000" ${editable ? "" : "disabled"} placeholder="${editable ? "Message" : "Read only"}"></textarea>
+          <button class="primary send-button" type="submit" ${editable ? "" : "disabled"}>${state.editingMessageId ? iconText("save", "Save") : iconText("send", "Send")}</button>
+          <div class="attachment-name" data-attachment-name>${state.attachedFile ? escapeHtml(state.attachedFile.name) : ""}</div>
+        </form>
+      `}
     </main>
   `;
 }
@@ -668,7 +706,6 @@ function renderChatPane() {
 function renderCallWindow() {
   const peers = [...state.voice.peers.values()];
   const total = peers.length + (state.voice.ghost ? 0 : 1);
-  const ringable = state.voice.ghost ? [] : ringableMembers();
   return `
     <section class="call-window ${state.callCollapsed ? "collapsed" : ""}">
       <header class="call-window-header">
@@ -681,14 +718,12 @@ function renderCallWindow() {
             <option value="720p" ${state.streamQuality === "720p" ? "selected" : ""}>720p</option>
             <option value="1080p" ${state.streamQuality === "1080p" ? "selected" : ""}>1080p</option>
             <option value="1440p" ${state.streamQuality === "1440p" ? "selected" : ""}>1440p</option>
+            <option value="4k" ${state.streamQuality === "4k" ? "selected" : ""}>4K</option>
+            <option value="5k" ${state.streamQuality === "5k" ? "selected" : ""}>5K</option>
+            <option value="source" ${state.streamQuality === "source" ? "selected" : ""}>Full</option>
           </select>
           ${state.voice.ghost ? `<span class="ghost-pill">${icon("ghost")} Ghost listening</span>` : `
             ${state.voice.screen ? `<button class="icon-button" data-action="changeScreen" title="Change shared window">${icon("window")}</button>` : ""}
-            <select class="ring-select" data-ring-target title="Ring user" ${ringable.length ? "" : "disabled"}>
-              <option value="">Ring user</option>
-              ${ringable.map((member) => `<option value="${member.user_id}">${escapeHtml(member.nickname || member.display_name || member.username)}</option>`).join("")}
-            </select>
-            <button class="icon-button" data-action="ringUser" title="Ring selected user" ${ringable.length ? "" : "disabled"}>${icon("bell")}</button>
             <button class="icon-button ${state.voice.muted ? "danger" : ""}" data-action="toggleMute" title="Mute">${icon(state.voice.muted ? "micOff" : "mic")}</button>
             <button class="icon-button ${state.voice.camera ? "active" : ""}" data-action="toggleCamera" title="Camera">${icon("camera")}</button>
             <button class="icon-button ${state.voice.screen ? "active" : ""}" data-action="toggleScreen" title="Screen">${icon("screen")}</button>
@@ -761,7 +796,7 @@ function renderAvatarFallback(person) {
 function renderVideoTile(id, user, media) {
   const userId = id === "local" ? state.user.id : Number(String(id).replace("peer-", ""));
   const focused = state.focusedVideoId === id;
-  const tileClass = `video-tile ${focused ? "focused" : ""} ${state.speaking.has(userId) ? "speaking" : ""}`.trim();
+  const tileClass = `video-tile ${focused ? "focused" : ""} ${media.screen ? "screening" : ""} ${state.speaking.has(userId) ? "speaking" : ""}`.trim();
   const badges = [
     media.muted ? "muted" : "",
     media.camera ? "camera" : "",
@@ -804,6 +839,7 @@ function renderMessage(message) {
         </header>
         <p>${message.deleted ? "Message deleted" : linkify(escapeHtml(message.content))}</p>
         ${!message.deleted && message.image ? `<img class="message-image" src="${escapeHtml(message.image.data_url)}" alt="${escapeHtml(message.image.name || "image")}">` : ""}
+        ${!message.deleted && message.attachment ? `<a class="message-file" href="${escapeHtml(message.attachment.download_url)}" download="${escapeHtml(message.attachment.name || "attachment.zip")}">${icon("file")}<span>${escapeHtml(message.attachment.name || "attachment.zip")}<em>${formatFileSize(message.attachment.size || 0)}</em></span></a>` : ""}
       </div>
       ${actions}
     </article>
@@ -812,6 +848,13 @@ function renderMessage(message) {
 
 function linkify(html) {
   return html.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noreferrer">$1</a>');
+}
+
+function formatFileSize(bytes) {
+  const size = Number(bytes || 0);
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function renderTypingLine() {
@@ -843,13 +886,14 @@ function renderMemberPane() {
 
 function renderMember(member) {
   const online = state.online.has(member.user_id);
+  const mobile = online && state.mobileOnline.has(member.user_id);
   const roles = (member.roles || []).map((roleId) => state.snapshot.roles.find((role) => role.id === roleId)).filter(Boolean);
   return `
     <article class="member-card">
       ${renderAvatar(member, online ? "online" : "")}
       <div>
         <strong>${escapeHtml(member.nickname || member.display_name || member.username)}</strong>
-        <span>${online ? "online" : "offline"}</span>
+        <span class="member-status">${online ? "online" : "offline"}${mobile ? icon("phone") : ""}</span>
         <div class="role-pills">${roles.slice(0, 3).map((role) => `<em style="--role:${escapeHtml(role.color)}">${escapeHtml(role.name)}</em>`).join("")}</div>
       </div>
     </article>
@@ -997,6 +1041,7 @@ function renderProfileSettingsModal() {
         </div>
       </section>
       <button class="primary" type="submit">${iconText("save", "Save profile")}</button>
+      <button class="settings-logout danger" type="button" data-action="logout">${iconText("logout", "Log out")}</button>
       <footer class="settings-version">Mielcord v${escapeHtml(state.appVersion || APP_VERSION)}</footer>
     </form>
   `;
@@ -1066,6 +1111,7 @@ async function loadGuild(guildId, preferredChannelId = null) {
   state.snapshot = snapshot;
   state.activeGuildId = snapshot.guild.id;
   state.online = new Set(snapshot.online_user_ids || []);
+  state.mobileOnline = new Set(snapshot.mobile_user_ids || []);
   applyVoicePresence(snapshot.voice || {});
   const preferred = snapshot.channels.find((channel) => channel.id === preferredChannelId && channel.type === "text");
   const existing = snapshot.channels.find((channel) => channel.id === state.activeChannelId && channel.type === "text");
@@ -1088,11 +1134,20 @@ function connectWs() {
   const protocol = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${protocol}://${location.host}/ws`);
   state.ws = ws;
+  state.wsLastPong = Date.now();
+  ws.addEventListener("open", () => {
+    state.wsLastPong = Date.now();
+    startWsHeartbeat();
+  });
   ws.addEventListener("message", (event) => {
-    const packet = JSON.parse(event.data);
-    handleRealtime(packet.event, packet.payload || {});
+    try {
+      const packet = JSON.parse(event.data);
+      handleRealtime(packet.event, packet.payload || {});
+    } catch {}
   });
   ws.addEventListener("close", () => {
+    if (state.ws !== ws) return;
+    stopWsHeartbeat();
     if (!state.user) return;
     clearTimeout(state.wsReconnect);
     state.wsReconnect = setTimeout(connectWs, 1600);
@@ -1101,9 +1156,11 @@ function connectWs() {
 
 function disconnectWs(clear = true) {
   clearTimeout(state.wsReconnect);
-  if (state.ws) {
-    state.ws.onclose = null;
-    state.ws.close();
+  stopWsHeartbeat();
+  const ws = state.ws;
+  if (clear) state.ws = null;
+  if (ws) {
+    try { ws.close(); } catch {}
   }
   if (clear) state.ws = null;
 }
@@ -1114,17 +1171,47 @@ function wsSend(event, payload = {}) {
   }
 }
 
+function startWsHeartbeat() {
+  stopWsHeartbeat();
+  state.wsHeartbeat = setInterval(() => {
+    if (state.ws?.readyState !== WebSocket.OPEN) return;
+    if (Date.now() - state.wsLastPong > 75000) {
+      try { state.ws.close(); } catch {}
+      return;
+    }
+    wsSend("ping", { t: Date.now() });
+  }, 25000);
+}
+
+function stopWsHeartbeat() {
+  if (state.wsHeartbeat) clearInterval(state.wsHeartbeat);
+  state.wsHeartbeat = null;
+}
+
+function restoreVoiceAfterReconnect() {
+  if (!state.voice.channelId || state.ws?.readyState !== WebSocket.OPEN) return;
+  wsSend(state.voice.ghost ? "voice:ghost_join" : "voice:join", { channel_id: state.voice.channelId });
+  if (!state.voice.ghost) wsSend("voice:state", voiceStatePayload());
+}
+
 function handleRealtime(event, payload) {
   if (event === "hello") {
     applyVoicePresence(payload.voice || {});
+    const mobileForGuild = payload.mobile_user_ids?.[String(state.activeGuildId)];
+    if (Array.isArray(mobileForGuild)) state.mobileOnline = new Set(mobileForGuild);
+    state.wsLastPong = Date.now();
     render();
+    restoreVoiceAfterReconnect();
+  } else if (event === "pong") {
+    state.wsLastPong = Date.now();
   } else if (event === "error") {
     notice(payload.message || "Realtime error", "error");
   } else if (event === "message:create") {
     if (payload.channel_id === state.activeChannelId && !state.messages.some((message) => message.id === payload.id)) {
+      const shouldStick = isNearMessageBottom();
       state.messages.push(payload);
       render();
-      scrollMessages();
+      if (shouldStick) scrollMessages();
     }
   } else if (event === "message:update") {
     state.messages = state.messages.map((message) => message.id === payload.id ? payload : message);
@@ -1133,20 +1220,27 @@ function handleRealtime(event, payload) {
     if (payload.permanent) {
       state.messages = state.messages.filter((message) => message.id !== payload.id);
     } else {
-      state.messages = state.messages.map((message) => message.id === payload.id ? { ...message, deleted: true, content: "", image: null, deleted_at: Date.now() / 1000 } : message);
+      state.messages = state.messages.map((message) => message.id === payload.id ? { ...message, deleted: true, content: "", image: null, attachment: null, deleted_at: Date.now() / 1000 } : message);
     }
     render();
   } else if (event.startsWith("channel:") || event.startsWith("role:") || event === "guild:update" || event === "member:join" || event === "member:remove") {
     if (state.activeGuildId) loadGuild(state.activeGuildId).catch((error) => notice(error.message, "error"));
   } else if (event === "presence:update") {
-    if (payload.status === "online") state.online.add(payload.user_id);
-    if (payload.status === "offline") state.online.delete(payload.user_id);
+    if (payload.status === "online") {
+      state.online.add(payload.user_id);
+      if (payload.mobile) state.mobileOnline.add(payload.user_id);
+      else state.mobileOnline.delete(payload.user_id);
+    }
+    if (payload.status === "offline") {
+      state.online.delete(payload.user_id);
+      state.mobileOnline.delete(payload.user_id);
+    }
     render();
   } else if (event === "typing:start") {
     if (payload.channel_id === state.activeChannelId && payload.user?.id !== state.user.id) {
       state.typing.set(payload.user.id, { user: payload.user, at: Date.now() });
-      render();
-      setTimeout(render, 3600);
+      renderTypingOnly();
+      setTimeout(renderTypingOnly, 3600);
     }
   } else if (event === "voice:joined") {
     handleVoiceJoined(payload);
@@ -1218,11 +1312,22 @@ function ringSelectedUser() {
   wsSend("voice:ring", { target_user_id: targetUserId, channel_id: state.voice.channelId });
 }
 
+function isNearMessageBottom() {
+  const list = document.getElementById("messageList");
+  if (!list) return true;
+  return list.scrollHeight - list.scrollTop - list.clientHeight < 120;
+}
+
 function scrollMessages() {
   requestAnimationFrame(() => {
     const list = document.getElementById("messageList");
     if (list) list.scrollTop = list.scrollHeight;
   });
+}
+
+function renderTypingOnly() {
+  const line = document.querySelector(".typing-line");
+  if (line) line.innerHTML = renderTypingLine();
 }
 
 
@@ -1386,10 +1491,10 @@ root.addEventListener("input", (event) => {
 });
 
 document.addEventListener("change", (event) => {
-  if (event.target.matches('.composer input[name="image"]')) {
-    state.attachedImage = event.target.files?.[0] || null;
+  if (event.target.matches('.composer input[name="attachment"]')) {
+    state.attachedFile = event.target.files?.[0] || null;
     const name = document.querySelector("[data-attachment-name]");
-    if (name) name.textContent = state.attachedImage?.name || "";
+    if (name) name.textContent = state.attachedFile?.name || "";
   }
   if (event.target.matches('[data-action="streamQuality"]')) {
     state.streamQuality = event.target.value;
@@ -1575,19 +1680,19 @@ async function deleteChannel(channelId) {
 async function sendMessage(form) {
   const textarea = form.elements.content;
   const content = textarea.value.trim();
-  const imageFile = form.elements.image?.files?.[0] || null;
-  if ((!content && !imageFile) || !state.activeChannelId) return;
+  const file = form.elements.attachment?.files?.[0] || null;
+  if ((!content && !file) || !state.activeChannelId) return;
   if (state.editingMessageId) {
     await api(`/api/messages/${state.editingMessageId}`, { method: "PATCH", body: { content } });
     state.editingMessageId = null;
   } else {
-    const image = imageFile ? await readImageFile(imageFile) : null;
-    await api(`/api/channels/${state.activeChannelId}/messages`, { method: "POST", body: { content, image } });
+    const media = file ? await readComposerFile(file) : { image: null, attachment: null };
+    await api(`/api/channels/${state.activeChannelId}/messages`, { method: "POST", body: { content, image: media.image, attachment: media.attachment } });
   }
   textarea.value = "";
   textarea.style.height = "auto";
-  if (form.elements.image) form.elements.image.value = "";
-  state.attachedImage = null;
+  if (form.elements.attachment) form.elements.attachment.value = "";
+  state.attachedFile = null;
   const name = document.querySelector("[data-attachment-name]");
   if (name) name.textContent = "";
 }
@@ -1899,8 +2004,19 @@ function handlePeerJoined(payload) {
 
 function closePeerConnection(userId) {
   const pc = state.voice.pcs.get(Number(userId));
+  if (pc?._mielcordRestartTimer) clearTimeout(pc._mielcordRestartTimer);
   if (pc) pc.close();
   state.voice.pcs.delete(Number(userId));
+}
+
+function restartPeerIce(userId, pc, delay = 0) {
+  if (!pc || pc.signalingState === "closed") return;
+  if (pc._mielcordRestartTimer) clearTimeout(pc._mielcordRestartTimer);
+  pc._mielcordRestartTimer = setTimeout(() => {
+    if (!state.voice.channelId || pc.signalingState === "closed") return;
+    try { pc.restartIce?.(); } catch {}
+    negotiate(userId, true).catch(() => {});
+  }, delay);
 }
 
 function removePeer(userId) {
@@ -1941,10 +2057,14 @@ async function createPeer(userId, initiator = false) {
     syncMediaElements();
   });
 
+  pc.addEventListener("iceconnectionstatechange", () => {
+    if (pc.iceConnectionState === "failed") restartPeerIce(userId, pc, 0);
+    if (pc.iceConnectionState === "disconnected") restartPeerIce(userId, pc, 2500);
+  });
+
   pc.addEventListener("connectionstatechange", () => {
-    if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
-      if (pc.connectionState === "failed") pc.restartIce();
-    }
+    if (pc.connectionState === "failed") restartPeerIce(userId, pc, 0);
+    if (pc.connectionState === "disconnected") restartPeerIce(userId, pc, 2500);
   });
 
   if (initiator) await negotiate(userId);
@@ -1962,12 +2082,13 @@ function addLocalTracks(pc) {
   }
 }
 
-async function negotiate(userId) {
+async function negotiate(userId, iceRestart = false) {
   const pc = state.voice.pcs.get(userId) || await createPeer(userId, false);
   addLocalTracks(pc);
   const offer = await pc.createOffer({
     offerToReceiveAudio: true,
-    offerToReceiveVideo: true
+    offerToReceiveVideo: true,
+    iceRestart
   });
   await pc.setLocalDescription(offer);
   wsSend("rtc:signal", {
@@ -2142,11 +2263,58 @@ function leaveVoice(notify = true) {
   state.voice.ghost = false;
   state.focusedVideoId = null;
   state.callCollapsed = false;
+  cleanupRemoteAudioElements();
   if (previousChannelId) {
     if (!previousGhost) removeVoicePresence(state.user?.id);
     if (!previousGhost) playTone("leave");
   }
   render();
+}
+
+function remoteAudioLayer() {
+  let layer = document.getElementById("remoteAudioLayer");
+  if (!layer) {
+    layer = document.createElement("div");
+    layer.id = "remoteAudioLayer";
+    layer.className = "remote-audio-layer";
+    document.body.appendChild(layer);
+  }
+  return layer;
+}
+
+function ensureRemoteAudioElement(userId) {
+  const layer = remoteAudioLayer();
+  let audio = document.getElementById(`audio-peer-${userId}`);
+  if (!audio) {
+    audio = document.createElement("audio");
+    audio.id = `audio-peer-${userId}`;
+    audio.dataset.peerAudio = String(userId);
+    audio.autoplay = true;
+    audio.playsInline = true;
+    layer.appendChild(audio);
+  }
+  return audio;
+}
+
+function syncRemoteAudioElements() {
+  const active = new Set();
+  for (const [userId, peer] of state.voice.peers) {
+    active.add(String(userId));
+    if (!peer.stream) continue;
+    const audio = ensureRemoteAudioElement(userId);
+    if (audio.srcObject !== peer.stream) audio.srcObject = peer.stream;
+    applyPeerMediaSettings(userId);
+    const play = audio.play();
+    if (play?.catch) play.catch(() => {});
+  }
+  const layer = document.getElementById("remoteAudioLayer");
+  layer?.querySelectorAll("[data-peer-audio]").forEach((node) => {
+    if (!active.has(node.dataset.peerAudio)) node.remove();
+  });
+}
+
+function cleanupRemoteAudioElements() {
+  document.getElementById("remoteAudioLayer")?.remove();
 }
 
 function syncMediaElements() {
@@ -2170,6 +2338,7 @@ function syncMediaElements() {
       applyPeerMediaSettings(userId);
     }
   }
+  syncRemoteAudioElements();
   renderSpeakingHighlights();
 }
 

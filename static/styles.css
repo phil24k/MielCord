@@ -568,6 +568,25 @@ select:focus {
 .dock-actions {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dock-ring {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.dock-ring .ring-select {
+  min-width: 0;
+  height: 32px;
+  padding: 0 7px;
+}
+
+.dock-ring .icon-button {
+  width: 32px;
+  height: 32px;
 }
 
 .dock-actions .icon-button.active {
@@ -576,11 +595,28 @@ select:focus {
 }
 
 .chat-pane {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
   background: #1d1b19;
+}
+
+.chat-pane.call-only {
+  overflow: hidden;
+}
+
+.chat-pane.call-only .call-window {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  border-bottom: 0;
+}
+
+.chat-pane.call-only .voice-stage {
+  min-height: 0;
+  overflow: auto;
 }
 
 .call-pane {
@@ -646,7 +682,7 @@ select:focus {
 
 .video-tile.focused {
   grid-column: 1 / -1;
-  min-height: 360px;
+  min-height: clamp(360px, 52vw, 820px);
   animation: softPulse 1.4s ease-in-out infinite;
 }
 
@@ -748,12 +784,12 @@ select:focus {
 }
 
 .call-stage .video-grid {
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(440px, 100%), 1fr));
   align-content: start;
 }
 
 .call-stage .video-tile {
-  min-height: 220px;
+  min-height: clamp(260px, 32vw, 680px);
 }
 
 .search-box {
@@ -817,8 +853,17 @@ select:focus {
 
 .video-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
   gap: 10px;
+}
+
+.chat-pane.call-only .video-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(520px, 100%), 1fr));
+  align-content: start;
+}
+
+.chat-pane.call-only .video-tile {
+  min-height: clamp(280px, 30vw, 760px);
 }
 
 .video-tile {
@@ -849,6 +894,23 @@ select:focus {
   object-fit: cover;
   display: block;
   opacity: 0;
+}
+
+.video-tile.screening video {
+  object-fit: contain;
+  background: #050505;
+}
+
+.video-tile:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  aspect-ratio: auto;
+  border-radius: 0;
+}
+
+.video-tile:fullscreen video {
+  object-fit: contain;
+  opacity: 1;
 }
 
 .video-tile video.has-video {
@@ -900,6 +962,7 @@ select:focus {
 }
 
 .message-list {
+  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   padding: 16px;
@@ -978,6 +1041,42 @@ select:focus {
   border: 1px solid var(--line);
   object-fit: contain;
   background: #0d0c0b;
+}
+
+.message-file {
+  width: min(420px, 100%);
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-3);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.message-file .button-icon {
+  width: 22px;
+  height: 22px;
+}
+
+.message-file span,
+.message-file em {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-file em {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
 }
 
 .message.deleted .message-body p {
@@ -1101,6 +1200,18 @@ select:focus {
 .member-card span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.member-card .member-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.member-status .button-icon {
+  width: 13px;
+  height: 13px;
+  color: var(--teal);
 }
 
 .role-pills {
@@ -1417,10 +1528,13 @@ select:focus {
 .settings-header .icon-button,
 .modal-card .icon-button {
   width: 32px;
+  min-width: 32px;
+  max-width: 32px;
   height: 32px;
   min-height: 32px;
   padding: 0;
   margin-top: 0;
+  flex: 0 0 32px;
   display: grid;
   place-items: center;
   background: var(--panel-3);
@@ -1438,7 +1552,7 @@ select:focus {
 
 .user-dock {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) 32px 32px;
+  grid-template-columns: 24px minmax(0, 1fr) 32px;
   align-items: center;
   gap: 8px;
   border-top: 1px solid var(--line);
@@ -1462,6 +1576,10 @@ select:focus {
 .user-dock span {
   color: var(--muted);
   font-size: 11px;
+}
+
+.settings-logout {
+  margin-top: 10px;
 }
 
 .client-settings {
@@ -1505,6 +1623,15 @@ select:focus {
   color: var(--text);
 }
 
+
+.remote-audio-layer {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
 
 .toast {
   position: fixed;
@@ -1559,13 +1686,34 @@ select:focus {
   }
 
   .app-shell.in-call .server-header p,
-  .app-shell.in-call .section-title span:last-child,
-  .app-shell.in-call .voice-dock {
+  .app-shell.in-call .section-title span:last-child {
     display: none;
   }
 
   .app-shell.in-call .channel-section {
     padding: 8px 6px;
+  }
+
+  .app-shell.in-call .voice-dock {
+    padding: 8px 6px;
+  }
+
+  .app-shell.in-call .voice-dock > div:first-child span {
+    display: none;
+  }
+
+  .app-shell.in-call .dock-actions {
+    gap: 4px;
+  }
+
+  .app-shell.in-call .dock-ring {
+    grid-template-columns: minmax(0, 1fr) 28px;
+    gap: 4px;
+  }
+
+  .app-shell.in-call .dock-ring .ring-select {
+    height: 28px;
+    font-size: 11px;
   }
 
   .app-shell.in-call .channel-button {
@@ -1690,12 +1838,24 @@ select:focus {
     overflow: auto;
   }
 
+  .chat-pane.call-only .call-window .voice-stage {
+    max-height: none;
+  }
+
+  .chat-pane.call-only .video-tile {
+    min-height: clamp(190px, 36dvh, 380px);
+  }
+
   .call-window .video-grid {
     grid-template-columns: minmax(180px, 1fr);
   }
 
   .video-tile.focused {
     min-height: 240px;
+  }
+
+  .chat-pane.call-only .video-grid {
+    grid-template-columns: 1fr;
   }
 
   .call-stage {
