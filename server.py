@@ -29,7 +29,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
-APP_VERSION = "1.1.0"
+APP_VERSION = "2.1.0"
 DB_PATH = Path(os.environ.get("MIELCORD_DB", ROOT / "mielcord.db")).resolve()
 CONFIG_PATH = Path(os.environ.get("MIELCORD_CONFIG", ROOT / "mielcord_config.json")).resolve()
 HOST = os.environ.get("MIELCORD_HOST", "0.0.0.0")
