@@ -443,6 +443,7 @@ class Database:
                     banned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     reason TEXT NOT NULL DEFAULT '',
                     created_at INTEGER NOT NULL,
+                    expires_at INTEGER,
                     PRIMARY KEY (guild_id, user_id)
                 );
 
@@ -489,6 +490,9 @@ class Database:
             conn.execute("ALTER TABLE messages ADD COLUMN file_data TEXT NOT NULL DEFAULT ''")
         if "file_size" not in message_columns:
             conn.execute("ALTER TABLE messages ADD COLUMN file_size INTEGER NOT NULL DEFAULT 0")
+        ban_columns = {row["name"] for row in conn.execute("PRAGMA table_info(bans)").fetchall()}
+        if "expires_at" not in ban_columns:
+            conn.execute("ALTER TABLE bans ADD COLUMN expires_at INTEGER")
 
     def user_count(self) -> int:
         with self.transaction() as conn:
@@ -659,6 +663,13 @@ class Database:
         if main_guild_id is None or int(guild_id) != main_guild_id:
             raise APIError(404, "Guild not found on this single-guild Mielcord host.")
 
+    def _active_ban_tx(self, conn: sqlite3.Connection, guild_id: int, user_id: int) -> sqlite3.Row | None:
+        ban = conn.execute("SELECT * FROM bans WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)).fetchone()
+        if ban and ban["expires_at"] and int(ban["expires_at"]) <= now():
+            conn.execute("DELETE FROM bans WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
+            return None
+        return ban
+
     def _ensure_main_guild_for_user_tx(self, conn: sqlite3.Connection, user_id: int, actor_id: int | None = None) -> int:
         guild_id = self._main_guild_id_tx(conn)
         if guild_id is None:
@@ -669,7 +680,7 @@ class Database:
                 description=self.config.guild_description(),
                 actor_id=actor_id or user_id,
             )
-        banned = conn.execute("SELECT 1 FROM bans WHERE guild_id = ? AND user_id = ?", (guild_id, user_id)).fetchone()
+        banned = self._active_ban_tx(conn, guild_id, user_id)
         if banned:
             raise APIError(403, "This account is banned from the guild.")
         conn.execute(
@@ -1101,10 +1112,7 @@ class Database:
             if invite["max_uses"] and int(invite["uses"]) >= int(invite["max_uses"]):
                 raise APIError(410, "Invite has no uses left.")
             guild_id = int(invite["guild_id"])
-            banned = conn.execute(
-                "SELECT 1 FROM bans WHERE guild_id = ? AND user_id = ?",
-                (guild_id, user_id),
-            ).fetchone()
+            banned = self._active_ban_tx(conn, guild_id, user_id)
             if banned:
                 raise APIError(403, "You are banned from this server.")
             already = conn.execute(
@@ -1225,18 +1233,24 @@ class Database:
             self._audit_tx(conn, guild_id, actor_id, "member.kick", "member", target_user_id, {"reason": reason[:240]})
             return {"guild_id": guild_id, "user_id": target_user_id}
 
-    def ban_member(self, guild_id: int, target_user_id: int, actor_id: int, reason: str = "") -> dict[str, Any]:
+    def ban_member(self, guild_id: int, target_user_id: int, actor_id: int, reason: str = "", expires_at: int | None = None) -> dict[str, Any]:
         with self.transaction() as conn:
             self._require_perm_tx(conn, guild_id, actor_id, "ban_members")
             if self._is_config_admin_user_id_tx(conn, target_user_id):
                 raise APIError(400, "Config admins cannot be banned. Remove the username from mielcord_config.json first.")
             conn.execute("DELETE FROM members WHERE guild_id = ? AND user_id = ?", (guild_id, target_user_id))
             conn.execute(
-                "INSERT OR REPLACE INTO bans (guild_id, user_id, banned_by, reason, created_at) VALUES (?, ?, ?, ?, ?)",
-                (guild_id, target_user_id, actor_id, reason[:240], now()),
+                "INSERT OR REPLACE INTO bans (guild_id, user_id, banned_by, reason, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (guild_id, target_user_id, actor_id, reason[:240], now(), expires_at),
             )
-            self._audit_tx(conn, guild_id, actor_id, "member.ban", "member", target_user_id, {"reason": reason[:240]})
-            return {"guild_id": guild_id, "user_id": target_user_id}
+            action = "member.tempban" if expires_at else "member.ban"
+            details = {"reason": reason[:240], "expires_at": expires_at}
+            self._audit_tx(conn, guild_id, actor_id, action, "member", target_user_id, details)
+            return {"guild_id": guild_id, "user_id": target_user_id, "expires_at": expires_at}
+
+    def tempban_member(self, guild_id: int, target_user_id: int, actor_id: int, hours: int, reason: str = "") -> dict[str, Any]:
+        hours = max(1, min(int(hours or 24), 8760))
+        return self.ban_member(guild_id, target_user_id, actor_id, reason, now() + hours * 3600)
 
     def list_audit(self, guild_id: int, user_id: int) -> list[dict[str, Any]]:
         with self.transaction() as conn:
@@ -1990,6 +2004,11 @@ class MielcordHandler(BaseHTTPRequestHandler):
                 action = segments[5]
                 if action == "ban" and method == "POST":
                     result = self.app.db.ban_member(guild_id, target_user_id, user_id, payload.get("reason", ""))
+                    self.app.hub.refresh_membership(target_user_id)
+                    self.app.hub.broadcast_guild(guild_id, "member:remove", result)
+                    return result, None
+                if action == "tempban" and method == "POST":
+                    result = self.app.db.tempban_member(guild_id, target_user_id, user_id, int(payload.get("hours") or 24), payload.get("reason", ""))
                     self.app.hub.refresh_membership(target_user_id)
                     self.app.hub.broadcast_guild(guild_id, "member:remove", result)
                     return result, None
