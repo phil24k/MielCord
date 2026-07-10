@@ -32,6 +32,7 @@ function saveClientJson(key, value) {
 }
 
 const DEFAULT_THEME = {
+  preset: "default",
   bg: "#171615",
   panel: "#22201d",
   panel2: "#2d2924",
@@ -76,6 +77,58 @@ const THEME_CONTROLS = [
   ["ok", "Success"]
 ];
 
+const THEME_PRESETS = {
+  default: {
+    label: "Mielcord",
+    description: "Default honey dark",
+    className: "",
+    colors: { ...DEFAULT_THEME, preset: "default" },
+    swatches: ["#171615", "#d99a23", "#2a9d8f"]
+  },
+  cyberpunk: {
+    label: "Cyberpunk",
+    description: "Neon city glow",
+    className: "theme-cyberpunk",
+    colors: {
+      preset: "cyberpunk",
+      bg: "#080713",
+      panel: "#111225",
+      panel2: "#181833",
+      panel3: "#25224b",
+      line: "#5b3df5",
+      text: "#f8f4ff",
+      muted: "#a5b7ff",
+      honey: "#ffe66d",
+      teal: "#00f5ff",
+      berry: "#ff2a6d",
+      danger: "#ff3b58",
+      ok: "#39ff88"
+    },
+    swatches: ["#080713", "#00f5ff", "#ff2a6d"]
+  },
+  windowsXp: {
+    label: "Windows XP",
+    description: "Y2K pastel desktop",
+    className: "theme-windows-xp",
+    colors: {
+      preset: "windowsXp",
+      bg: "#12c9ef",
+      panel: "#bdf6ff",
+      panel2: "#fff8fd",
+      panel3: "#f7b7df",
+      line: "#166b86",
+      text: "#16313c",
+      muted: "#586a72",
+      honey: "#ffe45e",
+      teal: "#00b7d8",
+      berry: "#ff7bc8",
+      danger: "#ff5f8f",
+      ok: "#55c96f"
+    },
+    swatches: ["#12c9ef", "#f7b7df", "#ffe45e"]
+  }
+};
+
 const state = {
   user: null,
   appVersion: APP_VERSION,
@@ -106,6 +159,7 @@ const state = {
   speaking: new Set(),
   speakingMonitors: new Map(),
   focusedVideoId: null,
+  fullscreenVideoId: null,
   callCollapsed: false,
   streamQuality: "1080p",
   deviceTest: {
@@ -160,6 +214,8 @@ const rtcConfig = {
 const icons = {
   login: '<svg viewBox="0 0 24 24"><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/><path d="M14 4h4a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3h-4"/></svg>',
   userPlus: '<svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6"/><path d="M22 11h-6"/></svg>',
+  users: '<svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+  grid: '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>',
   settings: '<svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.18.38.5.7.88.88.33.15.7.2 1.1.2H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51.92Z"/></svg>',
   brush: '<svg viewBox="0 0 24 24"><path d="m9.06 11.9 6.01-6.02a2.1 2.1 0 0 1 2.97 0l.08.08a2.1 2.1 0 0 1 0 2.97l-6.02 6.01"/><path d="M7 14c-2 0-3 1.5-3 3.5 0 1.4-1 2.5-2 2.5 2.5 1 6 .5 7.7-1.2 1.5-1.5 1.4-3.7-.1-4.8A4 4 0 0 0 7 14Z"/><path d="m14 6 4 4"/></svg>',
   logout: '<svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>',
@@ -196,6 +252,12 @@ function iconText(name, text) {
 
 function applyClientTheme(theme = state.clientTheme) {
   const merged = { ...DEFAULT_THEME, ...(theme || {}) };
+  const rootEl = document.documentElement;
+  Object.values(THEME_PRESETS).forEach((preset) => {
+    if (preset.className) rootEl.classList.remove(preset.className);
+  });
+  const preset = THEME_PRESETS[merged.preset] || null;
+  if (preset?.className) rootEl.classList.add(preset.className);
   for (const [key, cssVar] of Object.entries(THEME_CSS_VARS)) {
     document.documentElement.style.setProperty(cssVar, merged[key]);
   }
@@ -203,9 +265,18 @@ function applyClientTheme(theme = state.clientTheme) {
 
 function setThemeColor(key, value) {
   if (!THEME_CSS_VARS[key] || !/^#[0-9a-f]{6}$/i.test(value || "")) return;
-  state.clientTheme = { ...state.clientTheme, [key]: value };
+  state.clientTheme = { ...state.clientTheme, preset: "custom", [key]: value };
   applyClientTheme(state.clientTheme);
   saveClientJson("theme", state.clientTheme);
+}
+
+function applyThemePreset(presetId) {
+  const preset = THEME_PRESETS[presetId];
+  if (!preset) return;
+  state.clientTheme = { ...DEFAULT_THEME, ...preset.colors, preset: presetId };
+  applyClientTheme(state.clientTheme);
+  saveClientJson("theme", state.clientTheme);
+  renderThemeSettingsOnly();
 }
 
 function resetClientTheme() {
@@ -702,7 +773,9 @@ function renderChannelPane() {
             <p>${escapeHtml(guild?.description || state.user.username)}</p>
           </div>
         </div>
-        <button class="icon-button" data-open-modal="guildSettings" title="Guild settings">${icon("settings")}</button>
+        ${canAdmin()
+          ? `<button class="icon-button" data-open-modal="guildSettings" title="Guild settings">${icon("settings")}</button>`
+          : `<button class="icon-button" data-open-modal="memberDirectory" title="Members">${icon("users")}</button>`}
       </header>
       <section class="channel-section">
         <div class="section-title">
@@ -962,7 +1035,8 @@ function renderAvatarFallback(person) {
 function renderVideoTile(id, user, media) {
   const userId = id === "local" ? state.user.id : Number(String(id).replace("peer-", ""));
   const focused = state.focusedVideoId === id;
-  const tileClass = `video-tile ${focused ? "focused" : ""} ${media.screen ? "screening" : ""} ${state.speaking.has(userId) ? "speaking" : ""}`.trim();
+  const fullscreened = state.fullscreenVideoId === id;
+  const tileClass = `video-tile ${focused ? "focused" : ""} ${fullscreened ? "browser-fullscreen" : ""} ${media.screen ? "screening" : ""} ${state.speaking.has(userId) ? "speaking" : ""}`.trim();
   const badges = [
     media.muted ? "muted" : "",
     media.camera ? "camera" : "",
@@ -978,8 +1052,8 @@ function renderVideoTile(id, user, media) {
         <span>${badges.join(" ")}</span>
       </footer>
       <div class="video-actions">
-        <button class="icon-button" data-action="focusVideo" data-video-id="${id}" title="Focus in window">${icon("focus")}</button>
-        <button class="icon-button" data-action="fullscreenVideo" data-video-id="${id}" title="Fullscreen">${icon("fullscreen")}</button>
+        <button class="icon-button ${focused ? "active" : ""}" data-action="focusVideo" data-video-id="${id}" title="${focused ? "Back to grid" : "Large tile"}" aria-label="${focused ? "Back to grid" : "Large tile"}">${icon(focused ? "grid" : "window")}</button>
+        <button class="icon-button ${fullscreened ? "active" : ""}" data-action="fullscreenVideo" data-video-id="${id}" title="${fullscreened ? "Exit fullscreen" : "Browser fullscreen"}" aria-label="${fullscreened ? "Exit fullscreen" : "Browser fullscreen"}">${icon("fullscreen")}</button>
       </div>
     </article>
   `;
@@ -1063,6 +1137,74 @@ function renderMember(member) {
         <div class="role-pills">${roles.slice(0, 3).map((role) => `<em style="--role:${escapeHtml(role.color)}">${escapeHtml(role.name)}</em>`).join("")}</div>
       </div>
     </article>
+  `;
+}
+
+function voiceUserIds() {
+  const ids = new Set();
+  for (const room of state.voicePresence.values()) {
+    for (const userId of room.keys()) ids.add(Number(userId));
+  }
+  return ids;
+}
+
+function voiceChannelNameForUser(userId) {
+  for (const [channelId, room] of state.voicePresence.entries()) {
+    if (room.has(Number(userId))) {
+      const channel = state.snapshot?.channels.find((item) => item.id === Number(channelId));
+      return channel?.name || "Voice";
+    }
+  }
+  return "";
+}
+
+function renderDirectoryMember(member) {
+  const userId = Number(member.user_id);
+  const online = state.online.has(userId);
+  const mobile = online && state.mobileOnline.has(userId);
+  const voiceName = voiceChannelNameForUser(userId);
+  const roles = (member.roles || []).map((roleId) => state.snapshot.roles.find((role) => role.id === roleId)).filter(Boolean);
+  return `
+    <article class="directory-member-card ${online ? "online" : "offline"}">
+      ${renderAvatar(member, online ? "online" : "")}
+      <div>
+        <strong>${escapeHtml(member.nickname || member.display_name || member.username)}</strong>
+        <span>${online ? "Online" : "Offline"}${mobile ? ` ${icon("phone")} Mobile` : ""}${voiceName ? ` ${icon("voice")} ${escapeHtml(voiceName)}` : ""}</span>
+        <div class="role-pills">${roles.slice(0, 4).map((role) => `<em style="--role:${escapeHtml(role.color)}">${escapeHtml(role.name)}</em>`).join("")}</div>
+      </div>
+    </article>
+  `;
+}
+
+function renderMemberDirectoryModal() {
+  const members = state.snapshot?.members || [];
+  const voiceIds = voiceUserIds();
+  const sorted = [...members].sort((a, b) => {
+    const aOnline = state.online.has(Number(a.user_id)) ? 0 : 1;
+    const bOnline = state.online.has(Number(b.user_id)) ? 0 : 1;
+    if (aOnline !== bOnline) return aOnline - bOnline;
+    const aName = (a.nickname || a.display_name || a.username || "").toLowerCase();
+    const bName = (b.nickname || b.display_name || b.username || "").toLowerCase();
+    return aName.localeCompare(bName);
+  });
+  return `
+    <section class="modal-card member-directory-modal">
+      <header class="settings-header">
+        <div>
+          <h2>Members</h2>
+          <p>${members.length} members on this host</p>
+        </div>
+        <button class="icon-button" data-close-modal type="button">${icon("close")}</button>
+      </header>
+      <div class="member-summary-grid">
+        <div><strong>${state.online.size}</strong><span>Online</span></div>
+        <div><strong>${state.mobileOnline.size}</strong><span>Mobile</span></div>
+        <div><strong>${voiceIds.size}</strong><span>In voice</span></div>
+      </div>
+      <div class="member-directory-list">
+        ${sorted.map(renderDirectoryMember).join("") || `<p class="empty">No members</p>`}
+      </div>
+    </section>
   `;
 }
 
@@ -1161,6 +1303,15 @@ function renderAdminPanel(guild, members) {
 
 function renderThemeControls() {
   return `
+    <div class="theme-presets">
+      ${Object.entries(THEME_PRESETS).map(([id, preset]) => `
+        <button class="theme-preset ${state.clientTheme.preset === id ? "active" : ""}" type="button" data-action="applyThemePreset" data-theme-preset="${id}">
+          <span class="theme-swatch-row">${preset.swatches.map((color) => `<i style="--swatch:${escapeHtml(color)}"></i>`).join("")}</span>
+          <strong>${escapeHtml(preset.label)}</strong>
+          <span>${escapeHtml(preset.description)}</span>
+        </button>
+      `).join("")}
+    </div>
     <div class="theme-grid">
       ${THEME_CONTROLS.map(([key, label]) => `
         <label class="theme-color-row">
@@ -1271,6 +1422,7 @@ function renderGuildSettingsModal() {  const guild = activeGuild();
 function openModal(kind) {
   const forms = {
     guildSettings: renderGuildSettingsModal(),
+    memberDirectory: renderMemberDirectoryModal(),
     profileSettings: renderProfileSettingsModal(),
     themeSettings: renderThemeSettingsModal(),
     createText: `
@@ -1613,6 +1765,7 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "clearAttachment") clearAttachedFile();
   if (action === "resetTheme") resetClientTheme();
+  if (action === "applyThemePreset") applyThemePreset(button.dataset.themePreset);
   if (action === "cancelEdit") {
     state.editingMessageId = null;
     render();
@@ -1749,11 +1902,60 @@ document.addEventListener("click", (event) => {
   if (!event.target.closest(".peer-menu") && !event.target.closest("[data-peer-user-id]")) closePeerMenu();
 });
 
-function fullscreenVideo(videoId) {
-  const tile = [...document.querySelectorAll("[data-video-id]")].find((node) => node.dataset.videoId === videoId);
-  if (!tile?.requestFullscreen) throw new Error("Fullscreen is not available in this browser.");
-  return tile.requestFullscreen();
+function documentFullscreenElement() {
+  return document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement || null;
 }
+
+function exitDocumentFullscreen() {
+  const exit = document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen;
+  return exit ? exit.call(document) : Promise.resolve();
+}
+
+async function requestDocumentFullscreen() {
+  const target = document.documentElement;
+  const request = target.requestFullscreen || target.webkitRequestFullscreen || target.msRequestFullscreen;
+  if (!request) throw new Error("Fullscreen is not available in this browser.");
+  try {
+    return await request.call(target, { navigationUI: "hide" });
+  } catch {
+    return request.call(target);
+  }
+}
+
+async function fullscreenVideo(videoId) {
+  if (![...document.querySelectorAll("[data-video-id]")].some((node) => node.dataset.videoId === videoId)) {
+    throw new Error("Video tile was not found.");
+  }
+  const current = documentFullscreenElement();
+  if (state.fullscreenVideoId === videoId) {
+    state.fullscreenVideoId = null;
+    render();
+    if (current) await exitDocumentFullscreen();
+    return;
+  }
+  if (current) await exitDocumentFullscreen();
+  state.fullscreenVideoId = videoId;
+  state.focusedVideoId = null;
+  try {
+    await requestDocumentFullscreen();
+    render();
+  } catch (error) {
+    state.fullscreenVideoId = null;
+    render();
+    throw error;
+  }
+}
+
+function handleDocumentFullscreenChange() {
+  if (!documentFullscreenElement() && state.fullscreenVideoId) {
+    state.fullscreenVideoId = null;
+    render();
+  }
+}
+
+["fullscreenchange", "webkitfullscreenchange", "msfullscreenchange"].forEach((eventName) => {
+  document.addEventListener(eventName, handleDocumentFullscreenChange);
+});
 
 function closePeerMenu() {
   document.querySelectorAll(".peer-menu").forEach((node) => node.remove());
@@ -2243,6 +2445,12 @@ function removePeer(userId) {
   closePeerConnection(userId);
   state.voice.peers.delete(userId);
   stopSpeakingMonitor(userId);
+  const videoId = `peer-${userId}`;
+  if (state.fullscreenVideoId === videoId) {
+    state.fullscreenVideoId = null;
+    if (documentFullscreenElement()) exitDocumentFullscreen().catch(() => {});
+  }
+  if (state.focusedVideoId === videoId) state.focusedVideoId = null;
   render();
 }
 
@@ -2482,6 +2690,8 @@ function leaveVoice(notify = true) {
   state.voice.screen = false;
   state.voice.ghost = false;
   state.focusedVideoId = null;
+  state.fullscreenVideoId = null;
+  if (documentFullscreenElement()) exitDocumentFullscreen().catch(() => {});
   state.callCollapsed = false;
   cleanupRemoteAudioElements();
   if (previousChannelId) {
