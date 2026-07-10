@@ -16,6 +16,20 @@ function saveClientBool(key, value) {
   } catch {}
 }
 
+function loadClientString(key, fallback = "") {
+  try {
+    return localStorage.getItem(`mielcord:${key}`) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function saveClientString(key, value) {
+  try {
+    localStorage.setItem(`mielcord:${key}`, value || "");
+  } catch {}
+}
+
 function loadClientJson(key, fallback) {
   try {
     const value = localStorage.getItem(`mielcord:${key}`);
@@ -138,7 +152,14 @@ const state = {
     allowedCountries: []
   },
   clientSettings: {
-    ringAlerts: loadClientBool("ringAlerts", true)
+    ringAlerts: loadClientBool("ringAlerts", true),
+    inputDeviceId: loadClientString("inputDeviceId", ""),
+    outputDeviceId: loadClientString("outputDeviceId", "")
+  },
+  audioDevices: {
+    inputs: [],
+    outputs: [],
+    loaded: false
   },
   clientTheme: loadClientJson("theme", DEFAULT_THEME),
   guilds: [],
@@ -180,6 +201,7 @@ const state = {
     cameraStream: null,
     screenStream: null,
     muted: false,
+    deafened: false,
     camera: false,
     screen: false,
     ghost: false,
@@ -235,6 +257,7 @@ const icons = {
   fullscreen: '<svg viewBox="0 0 24 24"><path d="M8 3H3v5"/><path d="M16 3h5v5"/><path d="M8 21H3v-5"/><path d="M16 21h5v-5"/></svg>',
   window: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18"/><path d="M8 5v4"/></svg>',
   volume: '<svg viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a10 10 0 0 1 0 14"/></svg>',
+  headphones: '<svg viewBox="0 0 24 24"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3Z"/><path d="M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3Z"/></svg>',
   bell: '<svg viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 7 3 9H3c0-2 3-2 3-9"/><path d="M10.3 21a2 2 0 0 0 3.4 0"/><path d="M4 2 2 4"/><path d="M22 4l-2-2"/></svg>',
   ghost: '<svg viewBox="0 0 24 24"><path d="M9 10h.01"/><path d="M15 10h.01"/><path d="M12 2a7 7 0 0 0-7 7v11l2-1.5L9 20l3-2 3 2 2-1.5 2 1.5V9a7 7 0 0 0-7-7Z"/></svg>',
   file: '<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg>',
@@ -344,6 +367,91 @@ function requireMedia(kind) {
     throw new Error(`${kind} is not available in this browser. Try HTTPS, localhost, or a newer browser.`);
   }
   return devices;
+}
+
+function audioInputConstraints() {
+  const deviceId = state.clientSettings.inputDeviceId;
+  return {
+    ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+    channelCount: 2,
+    sampleRate: 48000
+  };
+}
+
+async function refreshMediaDevices() {
+  const devices = mediaDevices();
+  if (!devices?.enumerateDevices) {
+    state.audioDevices = { inputs: [], outputs: [], loaded: true };
+    renderDeviceSettingsOnly();
+    return;
+  }
+  const list = await devices.enumerateDevices();
+  state.audioDevices = {
+    inputs: list.filter((device) => device.kind === "audioinput"),
+    outputs: list.filter((device) => device.kind === "audiooutput"),
+    loaded: true
+  };
+  renderDeviceSettingsOnly();
+}
+
+function renderDeviceOptions(devices, selected, fallback) {
+  const options = [`<option value="">${escapeHtml(fallback)}</option>`];
+  devices.forEach((device, index) => {
+    const label = device.label || `Device ${index + 1}`;
+    options.push(`<option value="${escapeHtml(device.deviceId)}" ${device.deviceId === selected ? "selected" : ""}>${escapeHtml(label)}</option>`);
+  });
+  return options.join("");
+}
+
+function renderDeviceSettings() {
+  const outputSupported = typeof HTMLMediaElement !== "undefined" && "setSinkId" in HTMLMediaElement.prototype;
+  return `
+    <header>
+      <strong>Audio devices</strong>
+      <span>${state.audioDevices.loaded ? "This browser" : "Not loaded"}</span>
+    </header>
+    <label>Microphone
+      <select data-device-select="input">
+        ${renderDeviceOptions(state.audioDevices.inputs, state.clientSettings.inputDeviceId, "Default microphone")}
+      </select>
+    </label>
+    <label>Headphones / speakers
+      <select data-device-select="output" ${outputSupported ? "" : "disabled"}>
+        ${renderDeviceOptions(state.audioDevices.outputs, state.clientSettings.outputDeviceId, outputSupported ? "Default output" : "Output selection unsupported")}
+      </select>
+    </label>
+    <button type="button" data-action="refreshDevices">${iconText("volume", "Refresh devices")}</button>
+  `;
+}
+
+function renderDeviceSettingsOnly() {
+  const section = document.querySelector("[data-device-settings]");
+  if (section) section.innerHTML = renderDeviceSettings();
+}
+
+async function setClientDevice(kind, value) {
+  if (kind === "input") {
+    state.clientSettings.inputDeviceId = value;
+    saveClientString("inputDeviceId", value);
+    if (state.voice.channelId && !state.voice.ghost) await restartLocalAudio();
+  }
+  if (kind === "output") {
+    state.clientSettings.outputDeviceId = value;
+    saveClientString("outputDeviceId", value);
+    applyAudioOutputToExisting();
+  }
+}
+
+function applyAudioOutput(audio) {
+  if (!audio?.setSinkId) return;
+  audio.setSinkId(state.clientSettings.outputDeviceId || "").catch(() => {});
+}
+
+function applyAudioOutputToExisting() {
+  document.querySelectorAll("audio").forEach((audio) => applyAudioOutput(audio));
 }
 
 const IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
@@ -464,7 +572,8 @@ function applyPeerMediaSettings(userId) {
   const audio = document.getElementById(`audio-peer-${userId}`);
   if (audio) {
     audio.volume = settings.volume;
-    audio.muted = settings.muted;
+    audio.muted = state.voice.deafened || settings.muted;
+    applyAudioOutput(audio);
   }
 }
 
@@ -856,6 +965,7 @@ function renderVoiceDock() {
       <div class="dock-actions">
         ${state.voice.ghost ? `<button class="icon-button active" title="Ghost listening">${icon("ghost")}</button>` : `
           <button class="icon-button ${state.voice.muted ? "danger" : ""}" data-action="toggleMute" title="Mute">${icon(state.voice.muted ? "micOff" : "mic")}</button>
+          <button class="icon-button ${state.voice.deafened ? "danger" : ""}" data-action="toggleDeafen" title="Deafen">${icon("headphones")}</button>
           <button class="icon-button ${state.voice.camera ? "active" : ""}" data-action="toggleCamera" title="Camera">${icon("camera")}</button>
           <button class="icon-button ${state.voice.screen ? "active" : ""}" data-action="toggleScreen" title="Screen">${icon("screen")}</button>
         `}
@@ -946,6 +1056,7 @@ function renderCallWindow() {
           ${state.voice.ghost ? `<span class="ghost-pill">${icon("ghost")} Ghost listening</span>` : `
             ${state.voice.screen ? `<button class="icon-button" data-action="changeScreen" title="Change shared window">${icon("window")}</button>` : ""}
             <button class="icon-button ${state.voice.muted ? "danger" : ""}" data-action="toggleMute" title="Mute">${icon(state.voice.muted ? "micOff" : "mic")}</button>
+          <button class="icon-button ${state.voice.deafened ? "danger" : ""}" data-action="toggleDeafen" title="Deafen">${icon("headphones")}</button>
             <button class="icon-button ${state.voice.camera ? "active" : ""}" data-action="toggleCamera" title="Camera">${icon("camera")}</button>
             <button class="icon-button ${state.voice.screen ? "active" : ""}" data-action="toggleScreen" title="Screen">${icon("screen")}</button>
           `}
@@ -997,13 +1108,15 @@ function renderVoiceStage() {
   const peers = [...state.voice.peers.values()];
   const total = peers.length + (state.voice.ghost ? 0 : 1);
   const layout = videoGridLayout(total || 1);
+  const hasFocus = !!state.focusedVideoId && !state.fullscreenVideoId;
+  const focusSideCount = Math.max(1, total - 1);
   return `
     <section class="voice-stage ${state.voice.ghost ? "ghost-stage" : ""}">
       <div class="stage-header">
         <strong>${escapeHtml(state.voice.channelName)}</strong>
         <span>${state.voice.ghost ? `${peers.length} observed` : `${peers.length + 1} connected`}</span>
       </div>
-      <div class="video-grid" style="--video-cols:${layout.cols}; --video-rows:${layout.rows};">
+      <div class="video-grid ${hasFocus ? "has-focus" : ""}" style="--video-cols:${layout.cols}; --video-rows:${layout.rows}; --focus-side-count:${focusSideCount};">
         ${state.voice.ghost ? "" : renderVideoTile("local", state.user, {
           muted: state.voice.muted,
           camera: state.voice.camera,
@@ -1373,6 +1486,9 @@ function renderProfileSettingsModal() {
           <span>Ring tone and desktop notification</span>
         </label>
       </section>
+      <section class="client-settings audio-device-settings" data-device-settings>
+        ${renderDeviceSettings()}
+      </section>
       <section class="device-test">
         <header>
           <strong>Device test</strong>
@@ -1447,6 +1563,7 @@ function openModal(kind) {
   modal.className = "modal-backdrop";
   modal.innerHTML = `<div class="modal-close" data-close-modal></div>${forms[kind] || ""}`;
   document.body.appendChild(modal);
+  if (kind === "profileSettings") refreshMediaDevices().catch(() => {});
   syncDeviceTestElements();
   setTimeout(() => modal.classList.add("show"), 1);
 }
@@ -1787,6 +1904,8 @@ document.addEventListener("click", async (event) => {
   if (action === "ringUser") ringSelectedUser();
   if (action === "ghostJoinVoice") await safe(() => joinVoice(Number(button.dataset.ghostChannelId), true));
   if (action === "toggleMute") toggleMute();
+  if (action === "toggleDeafen") toggleDeafen();
+  if (action === "refreshDevices") await safe(refreshMediaDevices);
   if (action === "toggleMicTest") await safe(toggleMicTest);
   if (action === "toggleCameraTest") await safe(toggleCameraTest);
   if (action === "toggleCamera") await safe(toggleCamera);
@@ -1804,6 +1923,10 @@ document.addEventListener("click", async (event) => {
   if (action === "fullscreenVideo") await safe(() => fullscreenVideo(button.dataset.videoId));
   if (action === "localMutePeer") toggleLocalPeerMute(Number(button.dataset.userId));
   if (action === "adminDisconnectVoice") wsSend("voice:admin_disconnect", { target_user_id: Number(button.dataset.userId) });
+  if (action === "adminServerMute") await safe(() => adminServerMute(Number(button.dataset.userId)));
+  if (action === "adminKickMember") await safe(() => adminKickMember(Number(button.dataset.userId)));
+  if (action === "adminBanMember") await safe(() => adminBanMember(Number(button.dataset.userId)));
+  if (action === "adminTempBanMember") await safe(() => adminTempBanMember(Number(button.dataset.userId)));
   if (action === "leaveVoice") leaveVoice();
   if (action === "loadInvites") await safe(loadInvites);
   if (action === "loadAudit") await safe(loadAudit);
@@ -1875,6 +1998,9 @@ document.addEventListener("change", (event) => {
   }
   if (event.target.matches('[data-action="toggleRingAlerts"]')) {
     setRingAlerts(event.target.checked);
+  }
+  if (event.target.matches('[data-device-select]')) {
+    safe(() => setClientDevice(event.target.dataset.deviceSelect, event.target.value));
   }
 });
 
@@ -1969,6 +2095,34 @@ function toggleLocalPeerMute(userId) {
   render();
 }
 
+async function adminServerMute(userId) {
+  await api(`/api/guilds/${state.activeGuildId}/members/${userId}/voice`, { method: "POST", body: { muted: true, deafened: false } });
+  closePeerMenu();
+  notice("User server-muted.");
+}
+
+async function adminKickMember(userId) {
+  const reason = prompt("Kick reason", "") || "";
+  await api(`/api/guilds/${state.activeGuildId}/members/${userId}`, { method: "DELETE", body: { reason } });
+  closePeerMenu();
+  notice("User kicked from site.");
+}
+
+async function adminBanMember(userId) {
+  const reason = prompt("Ban reason", "") || "";
+  await api(`/api/guilds/${state.activeGuildId}/members/${userId}/ban`, { method: "POST", body: { reason } });
+  closePeerMenu();
+  notice("User banned from site.");
+}
+
+async function adminTempBanMember(userId) {
+  const hours = Number(prompt("Tempban hours", "24") || 24);
+  const reason = prompt("Tempban reason", "") || "";
+  await api(`/api/guilds/${state.activeGuildId}/members/${userId}/tempban`, { method: "POST", body: { hours, reason } });
+  closePeerMenu();
+  notice(`User tempbanned for ${Math.max(1, Math.min(hours || 24, 8760))}h.`);
+}
+
 function showPeerMenu(event, userId) {
   closePeerMenu();
   const member = state.snapshot?.members.find((item) => item.user_id === userId);
@@ -1985,7 +2139,11 @@ function showPeerMenu(event, userId) {
       <input type="range" min="0" max="200" value="${Math.round(settings.volume * 100)}" data-peer-volume="${userId}">
     </label>
     <button data-action="localMutePeer" data-user-id="${userId}">${iconText(settings.muted ? "mic" : "micOff", settings.muted ? "Unmute locally" : "Mute locally")}</button>
-    ${hasPermission("mute_members") ? `<button data-action="adminDisconnectVoice" data-user-id="${userId}">${iconText("phoneOff", "Disconnect from voice")}</button>` : ""}
+    ${hasPermission("mute_members") ? `<button data-action="adminDisconnectVoice" data-user-id="${userId}">${iconText("phoneOff", "Kick from voice")}</button>` : ""}
+    ${hasPermission("mute_members") ? `<button data-action="adminServerMute" data-user-id="${userId}">${iconText("micOff", "Server mute")}</button>` : ""}
+    ${hasPermission("kick_members") ? `<button data-action="adminKickMember" data-user-id="${userId}">${iconText("logout", "Kick from site")}</button>` : ""}
+    ${hasPermission("ban_members") ? `<button class="danger" data-action="adminTempBanMember" data-user-id="${userId}">${iconText("bell", "Tempban 24h")}</button>` : ""}
+    ${hasPermission("ban_members") ? `<button class="danger" data-action="adminBanMember" data-user-id="${userId}">${iconText("trash", "Ban from site")}</button>` : ""}
   `;
   document.body.appendChild(menu);
 }
@@ -2239,13 +2397,7 @@ async function toggleMicTest() {
     return;
   }
   const stream = await requireMedia("Mic test").getUserMedia({
-    audio: {
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: false,
-      channelCount: 2,
-      sampleRate: 48000
-    },
+    audio: audioInputConstraints(),
     video: false
   });
   state.deviceTest.micStream = stream;
@@ -2318,6 +2470,7 @@ function syncDeviceTestElements() {
       if (audio.srcObject !== state.deviceTest.micStream) audio.srcObject = state.deviceTest.micStream;
       audio.muted = false;
       audio.volume = 0.8;
+      applyAudioOutput(audio);
       const play = audio.play();
       if (play?.catch) play.catch(() => {});
     } else {
@@ -2354,13 +2507,7 @@ async function joinVoice(channelId, ghost = false) {
 async function ensureAudio() {
   if (state.voice.localAudio) return state.voice.localAudio;
   const stream = await requireMedia("Voice chat").getUserMedia({
-    audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-      channelCount: 2,
-      sampleRate: 48000
-    },
+    audio: audioInputConstraints(),
     video: false
   });
   state.voice.localAudio = stream;
@@ -2370,6 +2517,25 @@ async function ensureAudio() {
   });
   startSpeakingMonitor(state.user?.id, stream, () => state.voice.muted);
   return stream;
+}
+
+async function restartLocalAudio() {
+  const oldStream = state.voice.localAudio;
+  oldStream?.getTracks().forEach((track) => track.stop());
+  state.voice.localAudio = null;
+  const stream = await ensureAudio();
+  const track = stream.getAudioTracks()[0] || null;
+  for (const pc of state.voice.pcs.values()) {
+    const sender = pc.getSenders().find((item) => item.track?._mielcordSource === "audio" || item.track?.kind === "audio");
+    if (sender) {
+      await sender.replaceTrack(track);
+      if (track) track._mielcordSource = "audio";
+    } else if (track) {
+      pc.addTrack(track, stream);
+    }
+  }
+  applyLocalMuteTracks();
+  publishVoiceState();
 }
 
 function handleVoiceJoined(payload) {
@@ -2559,6 +2725,14 @@ function toggleMute() {
   render();
 }
 
+function toggleDeafen() {
+  if (!state.voice.channelId) return;
+  state.voice.deafened = !state.voice.deafened;
+  playTone(state.voice.deafened ? "mute" : "unmute");
+  for (const userId of state.voice.peers.keys()) applyPeerMediaSettings(userId);
+  render();
+}
+
 async function toggleCamera() {
   if (!state.voice.channelId || state.voice.ghost) return;
   if (state.voice.cameraStream) {
@@ -2686,6 +2860,7 @@ function leaveVoice(notify = true) {
   state.voice.channelId = null;
   state.voice.channelName = "";
   state.voice.muted = false;
+  state.voice.deafened = false;
   state.voice.camera = false;
   state.voice.screen = false;
   state.voice.ghost = false;

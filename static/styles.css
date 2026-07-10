@@ -951,6 +951,28 @@ select:focus {
   aspect-ratio: auto;
 }
 
+.chat-pane.call-only .video-grid.has-focus {
+  grid-template-columns: minmax(0, 1fr) clamp(180px, 18vw, 320px);
+  grid-template-rows: repeat(var(--focus-side-count, 1), minmax(0, 1fr));
+  align-items: start;
+}
+
+.chat-pane.call-only .video-grid.has-focus .video-tile.focused {
+  grid-column: 1;
+  grid-row: 1 / -1;
+  height: 100%;
+  min-height: 0;
+  aspect-ratio: auto;
+}
+
+.chat-pane.call-only .video-grid.has-focus .video-tile:not(.focused) {
+  grid-column: 2;
+  height: auto;
+  min-height: 110px;
+  aspect-ratio: 16 / 9;
+  align-self: start;
+}
+
 .video-tile {
   position: relative;
   width: 100%;
@@ -1881,6 +1903,15 @@ select:focus {
   color: var(--text);
 }
 
+.audio-device-settings {
+  gap: 12px;
+}
+
+.audio-device-settings button {
+  width: 100%;
+  margin-top: 0;
+}
+
 .theme-modal {
   width: min(680px, 100%);
   display: grid;
@@ -2415,5 +2446,147 @@ select:focus {
 
   .call-stage .video-tile {
     min-height: 170px;
+  }
+}
+
+
+@media (max-width: 700px) {
+  .app-shell,
+  .app-shell.in-call {
+    grid-template-columns: 82px minmax(0, 1fr);
+    grid-template-rows: 100dvh;
+  }
+
+  .channel-pane,
+  .app-shell.in-call .channel-pane {
+    width: 82px;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  .server-header {
+    justify-content: center;
+    padding: 8px 6px;
+  }
+
+  .server-title {
+    justify-content: center;
+  }
+
+  .server-title > div,
+  .server-header > .icon-button,
+  .section-title span,
+  .channel-button strong,
+  .channel-button em,
+  .voice-roster-name,
+  .voice-roster-icons,
+  .voice-dock > div:first-child,
+  .dock-ring,
+  .user-dock > div {
+    display: none;
+  }
+
+  .channel-section {
+    padding: 8px 6px;
+  }
+
+  .channel-button {
+    min-height: 44px;
+    grid-template-columns: 1fr;
+    place-items: center;
+    padding: 8px 0;
+  }
+
+  .channel-button .button-icon,
+  .channel-button > span {
+    width: 22px;
+    height: 22px;
+  }
+
+  .voice-roster {
+    padding-left: 0;
+    display: grid;
+    justify-items: center;
+  }
+
+  .voice-roster-user {
+    grid-template-columns: 1fr;
+    padding: 3px 0;
+  }
+
+  .voice-dock {
+    padding: 8px 6px;
+  }
+
+  .dock-actions {
+    display: grid;
+    grid-template-columns: repeat(2, 32px);
+    justify-content: center;
+    gap: 6px;
+  }
+
+  .user-dock {
+    grid-template-columns: 1fr;
+    justify-items: center;
+    gap: 6px;
+    padding: 8px 6px;
+  }
+
+  .user-dock .icon-button {
+    width: 34px;
+    height: 34px;
+  }
+
+  .chat-pane {
+    grid-column: 2;
+    min-width: 0;
+  }
+
+  .call-window-header {
+    min-height: auto;
+    gap: 8px;
+  }
+
+  .call-actions {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(34px, 1fr));
+    gap: 6px;
+  }
+
+  .quality-select {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
+  .chat-pane.call-only .video-grid,
+  .chat-pane.call-only .video-grid.has-focus {
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+    overflow: hidden;
+  }
+
+  .chat-pane.call-only .video-grid.has-focus .video-tile.focused,
+  .chat-pane.call-only .video-grid.has-focus .video-tile:not(.focused) {
+    grid-column: 1;
+    grid-row: auto;
+    height: auto;
+    min-height: 0;
+    aspect-ratio: 16 / 9;
+  }
+
+  .chat-pane.call-only .video-grid.has-focus .video-tile:not(.focused) {
+    max-height: 118px;
+  }
+
+  .composer {
+    grid-template-columns: 38px minmax(0, 1fr) 38px;
+  }
+
+  .modal-card,
+  .theme-modal,
+  .member-directory-modal {
+    width: min(100%, calc(100vw - 16px));
+    max-height: calc(100dvh - 16px);
+    overflow: auto;
   }
 }
