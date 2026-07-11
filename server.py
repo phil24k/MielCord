@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import signal
+import socket
 import sqlite3
 import struct
 import sys
@@ -599,6 +600,7 @@ class Database:
         stamp = now()
         with self.transaction() as conn:
             conn.execute("DELETE FROM sessions WHERE expires_at < ?", (stamp,))
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
             conn.execute(
                 "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
                 (session_hash(token), user_id, stamp, stamp + SESSION_TTL_SECONDS),
@@ -1458,9 +1460,10 @@ class WSClient:
     send_lock: threading.Lock = field(default_factory=threading.Lock)
     voice_channel_id: int | None = None
     voice_guild_id: int | None = None
-    media_state: dict[str, Any] = field(default_factory=lambda: {"muted": False, "camera": False, "screen": False})
+    media_state: dict[str, Any] = field(default_factory=lambda: {"muted": False, "camera": False, "screen": False, "speaking": False})
     ghost: bool = False
     mobile: bool = False
+    overlay_subscribed: bool = False
 
     @property
     def user_id(self) -> int:
@@ -1485,6 +1488,29 @@ class Hub:
         mobile_by_guild = {str(guild_id): sorted(self.mobile_users(guild_id)) for guild_id in client.guild_ids}
         client.send("hello", {"user": client.user, "guild_ids": sorted(client.guild_ids), "voice": self.voice_presence_for_guilds(client.guild_ids), "mobile_user_ids": mobile_by_guild})
         self.broadcast_presence(client.user_id, "online", client.guild_ids)
+
+    def replace_user_connections(self, user_id: int) -> None:
+        with self.lock:
+            targets = [client for client in self.clients if client.user_id == user_id]
+        for client in targets:
+            try:
+                client.send("session:replaced", {"message": "Connecte ailleurs. Cette session a ete fermee."})
+            except OSError:
+                pass
+
+            def close_socket(sock=client.handler.request) -> None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
+            timer = threading.Timer(0.8, close_socket)
+            timer.daemon = True
+            timer.start()
 
     def unregister(self, client: WSClient) -> None:
         with self.lock:
@@ -1533,6 +1559,55 @@ class Hub:
     def voice_presence(self, guild_id: int) -> dict[str, list[dict[str, Any]]]:
         return self.voice_presence_for_guilds({guild_id})
 
+    def overlay_subject(self, client: WSClient) -> WSClient | None:
+        with self.lock:
+            candidates = [
+                candidate
+                for candidate in self.clients
+                if candidate.user_id == client.user_id and candidate.voice_channel_id and not candidate.ghost
+            ]
+        return candidates[0] if candidates else None
+
+    def overlay_snapshot(self, client: WSClient) -> dict[str, Any]:
+        subject = self.overlay_subject(client)
+        if not subject or not subject.voice_channel_id:
+            return {"channel_id": None, "channel_name": "", "users": []}
+        channel_id = int(subject.voice_channel_id)
+        try:
+            _, channel = self.db.can_join_voice(channel_id, client.user_id)
+            channel_name = channel.get("name", "Voice")
+        except APIError:
+            channel_name = "Voice"
+        with self.lock:
+            room = [peer for peer in self.voice_rooms.get(channel_id, set()) if not peer.ghost]
+        users = [
+            {
+                "user": peer.user,
+                "muted": bool(peer.media_state.get("muted")),
+                "camera": bool(peer.media_state.get("camera")),
+                "screen": bool(peer.media_state.get("screen")),
+                "speaking": bool(peer.media_state.get("speaking")),
+            }
+            for peer in room
+        ]
+        return {"channel_id": channel_id, "channel_name": channel_name, "users": users}
+
+    def send_overlay_snapshot(self, client: WSClient) -> None:
+        client.send("overlay:snapshot", self.overlay_snapshot(client))
+
+    def broadcast_overlay_for_channel(self, channel_id: int | None) -> None:
+        if not channel_id:
+            return
+        with self.lock:
+            subscribers = [client for client in self.clients if client.overlay_subscribed]
+        for client in subscribers:
+            subject = self.overlay_subject(client)
+            if subject and subject.voice_channel_id == channel_id:
+                try:
+                    self.send_overlay_snapshot(client)
+                except OSError:
+                    pass
+
     def broadcast_presence(self, user_id: int, status: str, guild_ids: set[int]) -> None:
         for guild_id in guild_ids:
             self.broadcast_guild(guild_id, "presence:update", {"user_id": user_id, "status": status, "mobile": user_id in self.mobile_users(guild_id)})
@@ -1561,6 +1636,9 @@ class Hub:
         payload = message.get("payload") or {}
         if event == "ping":
             client.send("pong", {"t": payload.get("t"), "at": now()})
+        elif event == "overlay:subscribe":
+            client.overlay_subscribed = True
+            self.send_overlay_snapshot(client)
         elif event == "typing:start":
             channel_id = int(payload.get("channel_id") or 0)
             guild_id = self.db.guild_id_for_channel(channel_id)
@@ -1589,6 +1667,23 @@ class Hub:
                 self.ring_user(client, int(payload.get("target_user_id") or 0))
             except APIError as exc:
                 client.send("error", {"message": exc.message})
+        elif event == "voice:speaking":
+            if client.ghost or not client.voice_channel_id or not client.voice_guild_id:
+                return
+            speaking = bool(payload.get("speaking"))
+            if bool(client.media_state.get("speaking")) != speaking:
+                client.media_state["speaking"] = speaking
+                self.broadcast_guild(
+                    client.voice_guild_id,
+                    "voice:speaking",
+                    {
+                        "channel_id": client.voice_channel_id,
+                        "user_id": client.user_id,
+                        "user": client.user,
+                        "speaking": speaking,
+                    },
+                )
+                self.broadcast_overlay_for_channel(client.voice_channel_id)
         elif event == "voice:state":
             if client.ghost:
                 return
@@ -1597,6 +1692,7 @@ class Hub:
                 "muted": bool(payload.get("muted")),
                 "camera": bool(payload.get("camera")),
                 "screen": bool(payload.get("screen")),
+                "speaking": bool(client.media_state.get("speaking")),
             })
             changed = {key: client.media_state.get(key) for key in client.media_state if previous.get(key) != client.media_state.get(key)}
             if client.voice_channel_id and client.voice_guild_id:
@@ -1611,6 +1707,7 @@ class Hub:
                         "changed": changed,
                     },
                 )
+                self.broadcast_overlay_for_channel(client.voice_channel_id)
         elif event == "rtc:signal":
             self.route_rtc_signal(client, payload)
 
@@ -1628,7 +1725,7 @@ class Hub:
             client.voice_channel_id = channel_id
             client.voice_guild_id = guild_id
             client.ghost = ghost
-            client.media_state = {"muted": True, "camera": False, "screen": False, "ghost": True} if ghost else {"muted": False, "camera": False, "screen": False}
+            client.media_state = {"muted": True, "camera": False, "screen": False, "speaking": False, "ghost": True} if ghost else {"muted": False, "camera": False, "screen": False, "speaking": False}
         if ghost and was_visible and not self._is_user_visible_online(client.user_id):
             self.broadcast_presence(client.user_id, "offline", client.guild_ids)
         if not ghost and not was_visible:
@@ -1652,6 +1749,7 @@ class Hub:
                 {"channel_id": channel_id, "user": client.user, "state": client.media_state},
                 exclude=client,
             )
+        self.broadcast_overlay_for_channel(channel_id)
 
     def leave_voice(self, client: WSClient, restore_visibility: bool = True) -> None:
         guild_id = client.voice_guild_id
@@ -1671,7 +1769,7 @@ class Hub:
                     self.voice_rooms.pop(channel_id, None)
             client.voice_channel_id = None
             client.voice_guild_id = None
-            client.media_state = {"muted": False, "camera": False, "screen": False}
+            client.media_state = {"muted": False, "camera": False, "screen": False, "speaking": False}
             client.ghost = False if restore_visibility else client.ghost
         if guild_id and was_ghost:
             for peer in peers:
@@ -1683,6 +1781,7 @@ class Hub:
             self.broadcast_guild(guild_id, "voice:peer_left", {"channel_id": channel_id, "user_id": client.user_id, "user": client.user})
         if restore_visibility and was_ghost:
             self.broadcast_presence(client.user_id, "online", client.guild_ids)
+        self.broadcast_overlay_for_channel(channel_id)
 
     def admin_disconnect_voice(self, client: WSClient, target_user_id: int) -> None:
         if not target_user_id or not client.voice_guild_id:
@@ -1919,6 +2018,7 @@ class MielcordHandler(BaseHTTPRequestHandler):
             self.app.limit("register_per_ip", self.client_ip(), "Too many account creation attempts.")
             self.validate_private_access(payload)
             user = self.app.db.create_user(payload.get("username", ""), payload.get("password", ""), payload.get("email", ""))
+            self.app.hub.replace_user_connections(int(user["id"]))
             token = self.app.db.create_session(int(user["id"]))
             private = self.app.db.private_user(int(user["id"])) or user
             return {"user": private, "guilds": self.app.db.list_guilds(int(user["id"])), "version": APP_VERSION}, make_cookie(token)
@@ -1929,6 +2029,7 @@ class MielcordHandler(BaseHTTPRequestHandler):
             self.app.limit("login_per_account", f"{self.client_ip()}:{username_lc}", "Too many login attempts for this account.")
             self.validate_private_access(payload)
             user = self.app.db.authenticate(payload.get("username", ""), payload.get("password", ""))
+            self.app.hub.replace_user_connections(int(user["id"]))
             token = self.app.db.create_session(int(user["id"]))
             private = self.app.db.private_user(int(user["id"])) or user
             return {"user": private, "guilds": self.app.db.list_guilds(int(user["id"])), "version": APP_VERSION}, make_cookie(token)
