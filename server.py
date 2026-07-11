@@ -12,7 +12,6 @@ import os
 import re
 import secrets
 import signal
-import socket
 import sqlite3
 import struct
 import sys
@@ -22,6 +21,7 @@ import traceback
 import urllib.parse
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from email.utils import formatdate
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -37,6 +37,7 @@ HOST = os.environ.get("MIELCORD_HOST", "0.0.0.0")
 PORT = int(os.environ.get("MIELCORD_PORT", "8080"))
 SESSION_COOKIE = "mielcord_session"
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
+MAX_SESSIONS_PER_USER = 5
 MAX_JSON_BYTES = 80_000_000
 MAX_MESSAGE_CHARS = 4_000
 MAX_IMAGE_DATA_BYTES = 2_000_000
@@ -600,10 +601,21 @@ class Database:
         stamp = now()
         with self.transaction() as conn:
             conn.execute("DELETE FROM sessions WHERE expires_at < ?", (stamp,))
-            conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
             conn.execute(
                 "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
                 (session_hash(token), user_id, stamp, stamp + SESSION_TTL_SECONDS),
+            )
+            conn.execute(
+                """
+                DELETE FROM sessions
+                WHERE token_hash IN (
+                    SELECT token_hash FROM sessions
+                    WHERE user_id = ?
+                    ORDER BY created_at DESC, rowid DESC
+                    LIMIT -1 OFFSET ?
+                )
+                """,
+                (user_id, MAX_SESSIONS_PER_USER),
             )
         return token
 
@@ -1457,6 +1469,7 @@ class WSClient:
     handler: "MielcordHandler"
     user: dict[str, Any]
     guild_ids: set[int]
+    session_id: str
     send_lock: threading.Lock = field(default_factory=threading.Lock)
     voice_channel_id: int | None = None
     voice_guild_id: int | None = None
@@ -1479,6 +1492,7 @@ class Hub:
     def __init__(self, db: Database):
         self.db = db
         self.lock = threading.RLock()
+        self.voice_join_lock = threading.Lock()
         self.clients: set[WSClient] = set()
         self.voice_rooms: dict[int, set[WSClient]] = {}
 
@@ -1489,28 +1503,32 @@ class Hub:
         client.send("hello", {"user": client.user, "guild_ids": sorted(client.guild_ids), "voice": self.voice_presence_for_guilds(client.guild_ids), "mobile_user_ids": mobile_by_guild})
         self.broadcast_presence(client.user_id, "online", client.guild_ids)
 
-    def replace_user_connections(self, user_id: int) -> None:
+    def offer_voice_handoff(self, client: WSClient) -> None:
         with self.lock:
-            targets = [client for client in self.clients if client.user_id == user_id]
-        for client in targets:
-            try:
-                client.send("session:replaced", {"message": "Connecte ailleurs. Cette session a ete fermee."})
-            except OSError:
-                pass
-
-            def close_socket(sock=client.handler.request) -> None:
-                try:
-                    sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-
-            timer = threading.Timer(0.8, close_socket)
-            timer.daemon = True
-            timer.start()
+            candidates = [
+                peer
+                for peer in self.clients
+                if peer is not client and peer.user_id == client.user_id and peer.voice_channel_id
+            ]
+        if not candidates:
+            return
+        source = next((peer for peer in candidates if not peer.ghost), candidates[0])
+        channel_id = int(source.voice_channel_id or 0)
+        if not channel_id:
+            return
+        try:
+            _, channel = self.db.can_join_voice(channel_id, client.user_id)
+        except APIError:
+            return
+        client.send(
+            "voice:handoff",
+            {
+                "channel_id": channel_id,
+                "channel_name": channel.get("name", "Voice"),
+                "ghost": bool(source.ghost),
+                "message": "Voice is active on another device and can be moved here.",
+            },
+        )
 
     def unregister(self, client: WSClient) -> None:
         with self.lock:
@@ -1639,6 +1657,8 @@ class Hub:
         elif event == "overlay:subscribe":
             client.overlay_subscribed = True
             self.send_overlay_snapshot(client)
+        elif event == "device:activate":
+            self.offer_voice_handoff(client)
         elif event == "typing:start":
             channel_id = int(payload.get("channel_id") or 0)
             guild_id = self.db.guild_id_for_channel(channel_id)
@@ -1649,10 +1669,20 @@ class Hub:
                 exclude=client,
             )
         elif event == "voice:join":
-            self.join_voice(client, int(payload.get("channel_id") or 0), ghost=False)
+            self.join_voice(
+                client,
+                int(payload.get("channel_id") or 0),
+                ghost=False,
+                resume=bool(payload.get("resume")),
+            )
         elif event == "voice:ghost_join":
             try:
-                self.join_voice(client, int(payload.get("channel_id") or 0), ghost=True)
+                self.join_voice(
+                    client,
+                    int(payload.get("channel_id") or 0),
+                    ghost=True,
+                    resume=bool(payload.get("resume")),
+                )
             except APIError as exc:
                 client.send("error", {"message": exc.message})
         elif event == "voice:leave":
@@ -1711,10 +1741,41 @@ class Hub:
         elif event == "rtc:signal":
             self.route_rtc_signal(client, payload)
 
-    def join_voice(self, client: WSClient, channel_id: int, ghost: bool = False) -> None:
+    def join_voice(self, client: WSClient, channel_id: int, ghost: bool = False, resume: bool = False) -> None:
+        with self.voice_join_lock:
+            self._join_voice(client, channel_id, ghost=ghost, resume=resume)
+
+    def _join_voice(self, client: WSClient, channel_id: int, ghost: bool = False, resume: bool = False) -> None:
         guild_id, channel = self.db.can_join_voice(channel_id, client.user_id)
         if ghost:
             self.db.require_voice_moderator(guild_id, client.user_id)
+        with self.lock:
+            other_devices = [
+                peer
+                for peer in self.clients
+                if peer is not client and peer.user_id == client.user_id and peer.voice_channel_id
+            ]
+        if resume and any(peer.session_id != client.session_id for peer in other_devices):
+            client.send(
+                "voice:resume_blocked",
+                {
+                    "message": "Voice is active on another device.",
+                    "channel_id": channel_id,
+                },
+            )
+            return
+        for peer in other_devices:
+            try:
+                peer.send(
+                    "voice:transferred",
+                    {
+                        "message": "Voice moved to another device. Your account stays connected here.",
+                        "channel_id": peer.voice_channel_id,
+                    },
+                )
+            except OSError:
+                pass
+            self.leave_voice(peer)
         if client.voice_channel_id == channel_id and client.ghost == ghost:
             return
         was_visible = not client.ghost
@@ -1854,11 +1915,18 @@ def parse_cookie(header: str | None) -> dict[str, str]:
 
 def make_cookie(token: str) -> str:
     encoded = urllib.parse.quote(token)
-    return f"{SESSION_COOKIE}={encoded}; Path=/; Max-Age={SESSION_TTL_SECONDS}; HttpOnly; SameSite=Lax"
+    expires = formatdate(time.time() + SESSION_TTL_SECONDS, usegmt=True)
+    return (
+        f"{SESSION_COOKIE}={encoded}; Path=/; Max-Age={SESSION_TTL_SECONDS}; "
+        f"Expires={expires}; HttpOnly; SameSite=Lax"
+    )
 
 
 def clear_cookie() -> str:
-    return f"{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"
+    return (
+        f"{SESSION_COOKIE}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; "
+        "HttpOnly; SameSite=Lax"
+    )
 
 
 def read_ws_frame(stream) -> tuple[int, bytes] | None:
@@ -2018,7 +2086,6 @@ class MielcordHandler(BaseHTTPRequestHandler):
             self.app.limit("register_per_ip", self.client_ip(), "Too many account creation attempts.")
             self.validate_private_access(payload)
             user = self.app.db.create_user(payload.get("username", ""), payload.get("password", ""), payload.get("email", ""))
-            self.app.hub.replace_user_connections(int(user["id"]))
             token = self.app.db.create_session(int(user["id"]))
             private = self.app.db.private_user(int(user["id"])) or user
             return {"user": private, "guilds": self.app.db.list_guilds(int(user["id"])), "version": APP_VERSION}, make_cookie(token)
@@ -2029,7 +2096,6 @@ class MielcordHandler(BaseHTTPRequestHandler):
             self.app.limit("login_per_account", f"{self.client_ip()}:{username_lc}", "Too many login attempts for this account.")
             self.validate_private_access(payload)
             user = self.app.db.authenticate(payload.get("username", ""), payload.get("password", ""))
-            self.app.hub.replace_user_connections(int(user["id"]))
             token = self.app.db.create_session(int(user["id"]))
             private = self.app.db.private_user(int(user["id"])) or user
             return {"user": private, "guilds": self.app.db.list_guilds(int(user["id"])), "version": APP_VERSION}, make_cookie(token)
@@ -2287,9 +2353,9 @@ class MielcordHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def handle_websocket(self) -> None:
-        try:
-            user = self.require_user()
-        except APIError:
+        session_token = self.session_token()
+        user = self.app.db.user_for_session(session_token)
+        if user is None:
             self.send_error(HTTPStatus.UNAUTHORIZED)
             return
         key = self.headers.get("Sec-WebSocket-Key")
@@ -2305,7 +2371,13 @@ class MielcordHandler(BaseHTTPRequestHandler):
         self.send_header("Sec-WebSocket-Accept", accept)
         self.end_headers()
 
-        client = WSClient(self, user, self.app.db.guilds_for_user(int(user["id"])), mobile=is_mobile_user_agent(self.headers.get("User-Agent")))
+        client = WSClient(
+            self,
+            user,
+            self.app.db.guilds_for_user(int(user["id"])),
+            session_hash(session_token),
+            mobile=is_mobile_user_agent(self.headers.get("User-Agent")),
+        )
         self.app.hub.register(client)
         try:
             while True:
