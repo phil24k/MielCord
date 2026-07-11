@@ -154,8 +154,10 @@ const state = {
   clientSettings: {
     ringAlerts: loadClientBool("ringAlerts", true),
     inputDeviceId: loadClientString("inputDeviceId", ""),
-    outputDeviceId: loadClientString("outputDeviceId", "")
+    outputDeviceId: loadClientString("outputDeviceId", ""),
+    micSensitivity: Number(loadClientString("micSensitivity", "65"))
   },
+  settingsTab: "account",
   audioDevices: {
     inputs: [],
     outputs: [],
@@ -179,6 +181,7 @@ const state = {
   peerSettings: new Map(),
   speaking: new Set(),
   speakingMonitors: new Map(),
+  overlayState: null,
   focusedVideoId: null,
   fullscreenVideoId: null,
   callCollapsed: false,
@@ -584,13 +587,35 @@ function setSpeaking(userId, active) {
   const changed = active ? !state.speaking.has(key) : state.speaking.has(key);
   if (active) state.speaking.add(key);
   else state.speaking.delete(key);
+  if (changed && key === state.user?.id && state.voice.channelId && !state.voice.ghost) {
+    wsSend("voice:speaking", { speaking: active });
+  }
   if (changed) renderSpeakingHighlights();
+}
+
+function currentOverlayState() {
+  if (!state.voice.channelId) return { channel_id: null, channel_name: "", users: [] };
+  const users = voiceUsersFor(state.voice.channelId).map((entry) => ({
+    user: entry.user,
+    muted: !!entry.state?.muted,
+    camera: !!entry.state?.camera,
+    screen: !!entry.state?.screen,
+    speaking: state.speaking.has(Number(entry.user.id)) || !!entry.state?.speaking
+  }));
+  return { channel_id: state.voice.channelId, channel_name: state.voice.channelName, users };
+}
+
+function publishOverlayState() {
+  state.overlayState = currentOverlayState();
+  window.MielcordOverlay = state.overlayState;
+  window.dispatchEvent(new CustomEvent("mielcord:voice-overlay", { detail: state.overlayState }));
 }
 
 function renderSpeakingHighlights() {
   document.querySelectorAll("[data-user-id]").forEach((node) => {
     node.classList.toggle("speaking", state.speaking.has(Number(node.dataset.userId)));
   });
+  publishOverlayState();
 }
 
 function startSpeakingMonitor(userId, stream, muted = () => false) {
@@ -629,7 +654,9 @@ function startSpeakingMonitor(userId, stream, muted = () => false) {
     const rawLevel = Math.sqrt(sum / samples.length);
     monitor.level = monitor.level ? monitor.level * 0.82 + rawLevel * 0.18 : rawLevel;
     const alreadySpeaking = state.speaking.has(key);
-    const threshold = alreadySpeaking ? 7.5 : 11.5;
+    const sensitivity = Math.max(0, Math.min(100, Number(state.clientSettings.micSensitivity || 65)));
+    const startThreshold = 4 + ((100 - sensitivity) / 100) * 14;
+    const threshold = alreadySpeaking ? Math.max(2.5, startThreshold * 0.65) : startThreshold;
     const active = liveAudio && !monitor.muted() && monitor.level > threshold;
     if (active) {
       monitor.hot += 1;
@@ -939,8 +966,10 @@ function renderVoiceRoster(channelId) {
   if (!users.length) return "";
   return `
     <div class="voice-roster">
-      ${users.map((entry) => `
-        <div class="voice-roster-user ${state.speaking.has(Number(entry.user.id)) ? "speaking" : ""}" data-user-id="${entry.user.id}" data-peer-user-id="${entry.user.id}">
+      ${users.map((entry) => {
+        const isSpeaking = state.speaking.has(Number(entry.user.id)) || !!entry.state?.speaking;
+        return `
+        <div class="voice-roster-user ${isSpeaking ? "speaking" : ""}" data-user-id="${entry.user.id}" data-peer-user-id="${entry.user.id}">
           ${renderAvatar(entry.user, "mini")}
           <span class="voice-roster-name">${escapeHtml(entry.user.display_name || entry.user.username)}</span>
           <span class="voice-roster-icons">
@@ -948,7 +977,8 @@ function renderVoiceRoster(channelId) {
             ${entry.state?.screen ? icon("screen") : ""}
           </span>
         </div>
-      `).join("")}
+      `;
+      }).join("")}
     </div>
   `;
 }
@@ -1149,7 +1179,8 @@ function renderVideoTile(id, user, media) {
   const userId = id === "local" ? state.user.id : Number(String(id).replace("peer-", ""));
   const focused = state.focusedVideoId === id;
   const fullscreened = state.fullscreenVideoId === id;
-  const tileClass = `video-tile ${focused ? "focused" : ""} ${fullscreened ? "browser-fullscreen" : ""} ${media.screen ? "screening" : ""} ${state.speaking.has(userId) ? "speaking" : ""}`.trim();
+  const isSpeaking = state.speaking.has(userId) || !!media.speaking;
+  const tileClass = `video-tile ${focused ? "focused" : ""} ${fullscreened ? "browser-fullscreen" : ""} ${media.screen ? "screening" : ""} ${isSpeaking ? "speaking" : ""}`.trim();
   const badges = [
     media.muted ? "muted" : "",
     media.camera ? "camera" : "",
@@ -1454,40 +1485,67 @@ function renderThemeSettingsModal() {
   `;
 }
 
-function renderProfileSettingsModal() {
+function renderSettingsNav(active) {
+  const tabs = [
+    ["account", "Account", "Profile and email"],
+    ["voice", "Voice / Mic", "Devices and sensitivity"],
+    ["accessibility", "Accessibility", "Client comfort"]
+  ];
+  return `
+    <nav class="settings-tabs">
+      ${tabs.map(([id, label, detail]) => `
+        <button type="button" class="settings-tab ${active === id ? "active" : ""}" data-action="setSettingsTab" data-settings-tab="${id}">
+          <strong>${escapeHtml(label)}</strong>
+          <span>${escapeHtml(detail)}</span>
+        </button>
+      `).join("")}
+    </nav>
+  `;
+}
+
+function renderAccountSettings() {
+  return `
+    <section class="settings-panel account-settings-panel">
+      <form class="account-profile-form" data-action="updateProfile">
+        <div class="profile-preview">
+          ${renderAvatar(state.user || {}, "profile-avatar")}
+          <div>
+            <strong>${escapeHtml(state.user?.display_name || state.user?.username || "")}</strong>
+            <span>${escapeHtml(state.user?.email || "No email loaded")}</span>
+          </div>
+        </div>
+        <label>Display name<input name="display_name" value="${escapeHtml(state.user?.display_name || "")}" maxlength="40"></label>
+        <label>Email<input name="email" type="email" value="${escapeHtml(state.user?.email || "")}" autocomplete="email"></label>
+        <button class="primary" type="submit">${iconText("save", "Save profile")}</button>
+      </form>
+      <section class="client-settings account-session-settings">
+        <header>
+          <strong>Session</strong>
+          <span>This browser</span>
+        </header>
+        <button class="settings-logout danger" type="button" data-action="logout">${iconText("logout", "Log out")}</button>
+      </section>
+    </section>
+  `;
+}
+
+function renderVoiceSettings() {
   const micTesting = !!state.deviceTest.micStream;
   const cameraTesting = !!state.deviceTest.cameraStream;
   const micStatus = micTesting ? (state.voice.channelId ? "Voice muted for test" : "Monitoring locally") : "Ready";
+  const sensitivity = Math.max(0, Math.min(100, Number(state.clientSettings.micSensitivity || 65)));
   return `
-    <form class="modal-card profile-modal" data-action="updateProfile">
-      <header class="settings-header">
-        <div>
-          <h2>User settings</h2>
-          <p>Update your email to refresh Gravatar</p>
-        </div>
-        <button class="icon-button" data-close-modal type="button">${icon("close")}</button>
-      </header>
-      <div class="profile-preview">
-        ${renderAvatar(state.user || {}, "profile-avatar")}
-        <div>
-          <strong>${escapeHtml(state.user?.display_name || state.user?.username || "")}</strong>
-          <span>${escapeHtml(state.user?.email || "No email loaded")}</span>
-        </div>
-      </div>
-      <label>Display name<input name="display_name" value="${escapeHtml(state.user?.display_name || "")}" maxlength="40"></label>
-      <label>Email<input name="email" type="email" value="${escapeHtml(state.user?.email || "")}" autocomplete="email"></label>
-      <section class="client-settings">
-        <header>
-          <strong>Client</strong>
-          <span>This browser</span>
-        </header>
-        <label class="settings-toggle">
-          <input type="checkbox" data-action="toggleRingAlerts" ${state.clientSettings.ringAlerts ? "checked" : ""}>
-          <span>Ring tone and desktop notification</span>
-        </label>
-      </section>
+    <section class="settings-panel">
       <section class="client-settings audio-device-settings" data-device-settings>
         ${renderDeviceSettings()}
+      </section>
+      <section class="client-settings mic-sensitivity-settings">
+        <header>
+          <strong>Mic sensitivity</strong>
+          <span data-mic-sensitivity-value>${sensitivity}%</span>
+        </header>
+        <input type="range" min="0" max="100" value="${sensitivity}" data-mic-sensitivity>
+        <p>Higher sensitivity catches quieter voices. Lower it if background noise lights you up.</p>
       </section>
       <section class="device-test">
         <header>
@@ -1504,10 +1562,61 @@ function renderProfileSettingsModal() {
           <span>Camera preview</span>
         </div>
       </section>
-      <button class="primary" type="submit">${iconText("save", "Save profile")}</button>
-      <button class="settings-logout danger" type="button" data-action="logout">${iconText("logout", "Log out")}</button>
-      <footer class="settings-version">Mielcord v${escapeHtml(state.appVersion || APP_VERSION)}</footer>
-    </form>
+    </section>
+  `;
+}
+
+function renderAccessibilitySettings() {
+  return `
+    <section class="settings-panel">
+      <section class="client-settings">
+        <header>
+          <strong>Notifications</strong>
+          <span>This browser</span>
+        </header>
+        <label class="settings-toggle">
+          <input type="checkbox" data-action="toggleRingAlerts" ${state.clientSettings.ringAlerts ? "checked" : ""}>
+          <span>Ring tone and desktop notification</span>
+        </label>
+      </section>
+      <section class="client-settings">
+        <header>
+          <strong>Overlay data</strong>
+          <span>Electron-ready</span>
+        </header>
+        <p>Use <code>window.MielcordOverlay</code>, listen for <code>mielcord:voice-overlay</code>, or subscribe to <code>overlay:subscribe</code> on the WebSocket.</p>
+      </section>
+    </section>
+  `;
+}
+
+function renderSettingsPanel(active) {
+  if (active === "voice") return renderVoiceSettings();
+  if (active === "accessibility") return renderAccessibilitySettings();
+  return renderAccountSettings();
+}
+
+function renderProfileSettingsModal() {
+  const active = state.settingsTab || "account";
+  return `
+    <section class="modal-card profile-modal">
+      <header class="settings-header">
+        <div>
+          <h2>User settings</h2>
+          <p>${active === "voice" ? "Audio, devices, and mic pickup" : active === "accessibility" ? "Client-side comfort options" : "Account and Gravatar"}</p>
+        </div>
+        <button class="icon-button" data-close-modal type="button">${icon("close")}</button>
+      </header>
+      <div class="profile-settings-layout">
+        ${renderSettingsNav(active)}
+        <div class="profile-settings-content">
+          ${renderSettingsPanel(active)}
+        </div>
+      </div>
+      <footer class="profile-settings-footer">
+        <span class="settings-version">Mielcord v${escapeHtml(state.appVersion || APP_VERSION)}</span>
+      </footer>
+    </section>
   `;
 }
 
@@ -1536,6 +1645,7 @@ function renderGuildSettingsModal() {  const guild = activeGuild();
 }
 
 function openModal(kind) {
+  if (kind === "profileSettings") state.settingsTab = state.settingsTab || "account";
   const forms = {
     guildSettings: renderGuildSettingsModal(),
     memberDirectory: renderMemberDirectoryModal(),
@@ -1605,6 +1715,7 @@ function connectWs() {
   ws.addEventListener("open", () => {
     state.wsLastPong = Date.now();
     startWsHeartbeat();
+    wsSend("overlay:subscribe", {});
   });
   ws.addEventListener("message", (event) => {
     try {
@@ -1673,6 +1784,23 @@ function handleRealtime(event, payload) {
     state.wsLastPong = Date.now();
   } else if (event === "error") {
     notice(payload.message || "Realtime error", "error");
+  } else if (event === "session:replaced") {
+    notice(payload.message || "Connecte ailleurs.", "error");
+    stopDeviceTests(false);
+    stopAllSpeakingMonitors();
+    leaveVoice(false);
+    state.user = null;
+    state.guilds = [];
+    state.snapshot = null;
+    state.messages = [];
+    state.voicePresence.clear();
+    publishOverlayState();
+    disconnectWs();
+    render();
+  } else if (event === "overlay:snapshot") {
+    state.overlayState = payload;
+    window.MielcordOverlay = payload;
+    window.dispatchEvent(new CustomEvent("mielcord:voice-overlay", { detail: payload }));
   } else if (event === "message:create") {
     if (payload.channel_id === state.activeChannelId && !state.messages.some((message) => message.id === payload.id)) {
       const shouldStick = isNearMessageBottom();
@@ -1722,6 +1850,8 @@ function handleRealtime(event, payload) {
     handleVoiceRing(payload);
   } else if (event === "voice:ring_sent") {
     notice(payload.delivered ? "Ring sent" : "That user is offline right now", payload.delivered ? "info" : "error");
+  } else if (event === "voice:speaking") {
+    setSpeaking(payload.user_id, !!payload.speaking);
   } else if (event === "voice:state") {
     setVoicePresence(payload.channel_id, payload.user || state.voice.peers.get(payload.user_id)?.user || state.user, payload.state || {});
     const peer = state.voice.peers.get(payload.user_id);
@@ -1748,6 +1878,14 @@ function setRingAlerts(enabled) {
     if (permission?.catch) permission.catch(() => {});
   }
   refreshProfileSettingsModal();
+}
+
+function setMicSensitivity(value) {
+  const clean = Math.max(0, Math.min(100, Number(value || 65)));
+  state.clientSettings.micSensitivity = clean;
+  saveClientString("micSensitivity", String(clean));
+  const label = document.querySelector("[data-mic-sensitivity-value]");
+  if (label) label.textContent = `${clean}%`;
 }
 
 function handleVoiceRing(payload) {
@@ -1809,14 +1947,21 @@ function applyVoicePresence(snapshot) {
 
 function setVoicePresence(channelId, user, mediaState = {}, shouldRender = false) {
   if (!channelId || !user) return;
+  const userId = Number(user.id);
   const room = state.voicePresence.get(Number(channelId)) || new Map();
-  room.set(Number(user.id), { user, state: mediaState, channelId: Number(channelId) });
+  room.set(userId, { user, state: mediaState, channelId: Number(channelId) });
   state.voicePresence.set(Number(channelId), room);
+  if (Object.prototype.hasOwnProperty.call(mediaState, "speaking")) {
+    if (mediaState.speaking) state.speaking.add(userId);
+    else state.speaking.delete(userId);
+  }
+  publishOverlayState();
   if (shouldRender) render();
 }
 
 function removeVoicePresence(userId) {
   for (const room of state.voicePresence.values()) room.delete(Number(userId));
+  publishOverlayState();
 }
 
 function playVoiceStateSound(changed) {
@@ -1883,6 +2028,11 @@ document.addEventListener("click", async (event) => {
   if (action === "clearAttachment") clearAttachedFile();
   if (action === "resetTheme") resetClientTheme();
   if (action === "applyThemePreset") applyThemePreset(button.dataset.themePreset);
+  if (action === "setSettingsTab") {
+    state.settingsTab = button.dataset.settingsTab || "account";
+    refreshProfileSettingsModal();
+    if (state.settingsTab === "voice") refreshMediaDevices().catch(() => {});
+  }
   if (action === "cancelEdit") {
     state.editingMessageId = null;
     render();
@@ -2007,6 +2157,9 @@ document.addEventListener("change", (event) => {
 document.addEventListener("input", (event) => {
   if (event.target.matches('[data-theme-color]')) {
     setThemeColor(event.target.dataset.themeColor, event.target.value);
+  }
+  if (event.target.matches('[data-mic-sensitivity]')) {
+    setMicSensitivity(event.target.value);
   }
   if (event.target.matches('[data-peer-volume]')) {
     const userId = Number(event.target.dataset.peerVolume);
