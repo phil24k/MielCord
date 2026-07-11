@@ -185,6 +185,7 @@ const state = {
   focusedVideoId: null,
   fullscreenVideoId: null,
   callCollapsed: false,
+  mobileChannelsOpen: false,
   streamQuality: "1080p",
   deviceTest: {
     micStream: null,
@@ -240,6 +241,7 @@ const icons = {
   login: '<svg viewBox="0 0 24 24"><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/><path d="M14 4h4a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3h-4"/></svg>',
   userPlus: '<svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6"/><path d="M22 11h-6"/></svg>',
   users: '<svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+  menu: '<svg viewBox="0 0 24 24"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/></svg>',
   grid: '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>',
   settings: '<svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.18.38.5.7.88.88.33.15.7.2 1.1.2H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51.92Z"/></svg>',
   brush: '<svg viewBox="0 0 24 24"><path d="m9.06 11.9 6.01-6.02a2.1 2.1 0 0 1 2.97 0l.08.08a2.1 2.1 0 0 1 0 2.97l-6.02 6.01"/><path d="M7 14c-2 0-3 1.5-3 3.5 0 1.4-1 2.5-2 2.5 2.5 1 6 .5 7.7-1.2 1.5-1.5 1.4-3.7-.1-4.8A4 4 0 0 0 7 14Z"/><path d="m14 6 4 4"/></svg>',
@@ -870,8 +872,9 @@ function renderAuth() {
 
 function renderApp() {
   root.innerHTML = `
-    <div class="app-shell ${state.voice.channelId ? "in-call" : ""}">
+    <div class="app-shell ${state.voice.channelId ? "in-call" : ""} ${state.mobileChannelsOpen ? "mobile-channels-open" : ""}">
       ${renderChannelPane()}
+      <button class="mobile-drawer-backdrop" data-action="closeMobileChannels" aria-label="Close channel list"></button>
       ${renderChatPane()}
     </div>
   `;
@@ -900,7 +903,7 @@ function renderChannelPane() {
   const textChannels = state.snapshot?.channels.filter((channel) => channel.type === "text") || [];
   const voiceChannels = state.snapshot?.channels.filter((channel) => channel.type === "voice") || [];
   return `
-    <aside class="channel-pane">
+    <aside class="channel-pane" id="channelPane" aria-label="Channels">
       <header class="server-header">
         <div class="server-title">
           <img class="server-logo" src="/mielcord_logo_st.png" alt="">
@@ -909,24 +912,29 @@ function renderChannelPane() {
             <p>${escapeHtml(guild?.description || state.user.username)}</p>
           </div>
         </div>
-        ${canAdmin()
-          ? `<button class="icon-button" data-open-modal="guildSettings" title="Guild settings">${icon("settings")}</button>`
-          : `<button class="icon-button" data-open-modal="memberDirectory" title="Members">${icon("users")}</button>`}
+        <div class="server-header-actions">
+          ${canAdmin()
+            ? `<button class="icon-button" data-open-modal="guildSettings" title="Guild settings">${icon("settings")}</button>`
+            : `<button class="icon-button" data-open-modal="memberDirectory" title="Members">${icon("users")}</button>`}
+          <button class="icon-button mobile-drawer-close" data-action="closeMobileChannels" title="Close channels" aria-label="Close channels">${icon("close")}</button>
+        </div>
       </header>
-      <section class="channel-section">
-        <div class="section-title">
-          <span>Text</span>
-          ${hasPermission("manage_channels") ? `<button class="tiny" data-open-modal="createText" title="Create text channel">${icon("plus")}</button>` : ""}
-        </div>
-        ${textChannels.map(renderChannelButton).join("") || `<p class="empty">No text channels</p>`}
-      </section>
-      <section class="channel-section">
-        <div class="section-title">
-          <span>Voice</span>
-          ${hasPermission("manage_channels") ? `<button class="tiny" data-open-modal="createVoice" title="Create voice channel">${icon("plus")}</button>` : ""}
-        </div>
-        ${voiceChannels.map(renderChannelButton).join("") || `<p class="empty">No voice channels</p>`}
-      </section>
+      <div class="channel-list-scroll">
+        <section class="channel-section">
+          <div class="section-title">
+            <span>Text</span>
+            ${hasPermission("manage_channels") ? `<button class="tiny" data-open-modal="createText" title="Create text channel">${icon("plus")}</button>` : ""}
+          </div>
+          ${textChannels.map(renderChannelButton).join("") || `<p class="empty">No text channels</p>`}
+        </section>
+        <section class="channel-section">
+          <div class="section-title">
+            <span>Voice</span>
+            ${hasPermission("manage_channels") ? `<button class="tiny" data-open-modal="createVoice" title="Create voice channel">${icon("plus")}</button>` : ""}
+          </div>
+          ${voiceChannels.map(renderChannelButton).join("") || `<p class="empty">No voice channels</p>`}
+        </section>
+      </div>
       ${renderVoiceDock()}
       ${renderUserDock()}
     </aside>
@@ -992,7 +1000,7 @@ function renderVoiceDock() {
         <strong>${inVoice ? escapeHtml(state.voice.channelName) : "Voice"}</strong>
         <span>${inVoice ? (state.voice.ghost ? "Ghost listening" : "Connected") : "Disconnected"}</span>
       </div>
-      <div class="dock-actions">
+      ${inVoice ? `<div class="dock-actions">
         ${state.voice.ghost ? `<button class="icon-button active" title="Ghost listening">${icon("ghost")}</button>` : `
           <button class="icon-button ${state.voice.muted ? "danger" : ""}" data-action="toggleMute" title="Mute">${icon(state.voice.muted ? "micOff" : "mic")}</button>
           <button class="icon-button ${state.voice.deafened ? "danger" : ""}" data-action="toggleDeafen" title="Deafen">${icon("headphones")}</button>
@@ -1000,7 +1008,7 @@ function renderVoiceDock() {
           <button class="icon-button ${state.voice.screen ? "active" : ""}" data-action="toggleScreen" title="Screen">${icon("screen")}</button>
         `}
         <button class="icon-button danger" data-action="leaveVoice" title="Leave">${icon("phoneOff")}</button>
-      </div>
+      </div>` : ""}
       ${inVoice && !state.voice.ghost ? `
         <div class="dock-ring">
           <select class="ring-select" data-ring-target title="Ring user" ${ringable.length ? "" : "disabled"}>
@@ -1042,6 +1050,7 @@ function renderChatPane() {
   const callExpanded = !!state.voice.channelId && !state.callCollapsed;
   return `
     <main class="chat-pane ${callExpanded ? "call-only" : ""}">
+      ${renderMobileTopbar()}
       ${state.voice.channelId ? renderCallWindow() : ""}
       ${callExpanded ? "" : `
         ${state.searchResults.length ? renderSearchResults() : ""}
@@ -1061,6 +1070,34 @@ function renderChatPane() {
         </form>
       `}
     </main>
+  `;
+}
+
+function renderMobileTopbar() {
+  const channel = activeChannel();
+  const inVoice = !!state.voice.channelId;
+  const showingCall = inVoice && !state.callCollapsed;
+  const voiceCount = inVoice ? Math.max(1, voiceUsersFor(state.voice.channelId).length) : 0;
+  const title = showingCall ? state.voice.channelName : (channel?.name || "Mielcord");
+  const subtitle = showingCall
+    ? `${voiceCount} connected`
+    : inVoice
+      ? `In ${state.voice.channelName}`
+      : `${state.online.size} online`;
+  return `
+    <header class="mobile-topbar">
+      <button class="icon-button mobile-menu-button" data-action="toggleMobileChannels" aria-controls="channelPane" aria-expanded="${state.mobileChannelsOpen}" title="Channels">${icon("menu")}</button>
+      <div class="mobile-context">
+        ${icon(showingCall ? "voice" : "hash")}
+        <div>
+          <strong>${escapeHtml(title)}</strong>
+          <span>${escapeHtml(subtitle)}</span>
+        </div>
+      </div>
+      <div class="mobile-topbar-actions">
+        <button class="icon-button" data-open-modal="memberDirectory" title="Members">${icon("users")}</button>
+      </div>
+    </header>
   `;
 }
 
@@ -1976,11 +2013,21 @@ function handlePeerLeft(payload) {
   render();
 }
 
+function setMobileChannelsOpen(open) {
+  state.mobileChannelsOpen = !!open;
+  const shell = document.querySelector(".app-shell");
+  shell?.classList.toggle("mobile-channels-open", state.mobileChannelsOpen);
+  document.querySelectorAll('[data-action="toggleMobileChannels"]').forEach((button) => {
+    button.setAttribute("aria-expanded", String(state.mobileChannelsOpen));
+  });
+}
+
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("button, .search-hit");
   if (!button) return;
 
   if (button.dataset.openModal) {
+    setMobileChannelsOpen(false);
     openModal(button.dataset.openModal);
     return;
   }
@@ -1993,6 +2040,7 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (button.dataset.channelId) {
+    setMobileChannelsOpen(false);
     const channelId = Number(button.dataset.channelId);
     const channelType = button.dataset.channelType;
     if (channelType === "voice") {
@@ -2020,6 +2068,8 @@ document.addEventListener("click", async (event) => {
   const action = button.dataset.action;
   if (!action) return;
 
+  if (action === "toggleMobileChannels") setMobileChannelsOpen(!state.mobileChannelsOpen);
+  if (action === "closeMobileChannels") setMobileChannelsOpen(false);
   if (action === "logout") await safe(logout);
   if (action === "clearSearch") {
     state.searchResults = [];
@@ -2052,7 +2102,10 @@ document.addEventListener("click", async (event) => {
   if (action === "deleteChannel") await safe(() => deleteChannel(Number(button.dataset.channelId)));
   if (action === "moveChannel") await safe(() => moveChannel(Number(button.dataset.channelId), Number(button.dataset.direction)));
   if (action === "ringUser") ringSelectedUser();
-  if (action === "ghostJoinVoice") await safe(() => joinVoice(Number(button.dataset.ghostChannelId), true));
+  if (action === "ghostJoinVoice") {
+    setMobileChannelsOpen(false);
+    await safe(() => joinVoice(Number(button.dataset.ghostChannelId), true));
+  }
   if (action === "toggleMute") toggleMute();
   if (action === "toggleDeafen") toggleDeafen();
   if (action === "refreshDevices") await safe(refreshMediaDevices);
@@ -2087,9 +2140,15 @@ document.addEventListener("click", (event) => {
 });
 
 window.addEventListener("resize", () => {
+  const mobileLayout = window.matchMedia("(max-width: 820px), (pointer: coarse) and (max-width: 1024px)").matches;
+  if (!mobileLayout && state.mobileChannelsOpen) setMobileChannelsOpen(false);
   if (!state.voice.channelId || state.callCollapsed) return;
   clearTimeout(state.resizeRender);
   state.resizeRender = setTimeout(render, 120);
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.mobileChannelsOpen) setMobileChannelsOpen(false);
 });
 
 document.addEventListener("submit", async (event) => {
