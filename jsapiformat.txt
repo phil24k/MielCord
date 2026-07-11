@@ -1,0 +1,13 @@
+{
+  channel_id: 3,
+  channel_name: "Lobby",
+  users: [
+    {
+      user: { id: 1, username: "phil24k", display_name: "phil24k" },
+      muted: false,
+      camera: false,
+      screen: true,
+      speaking: true
+    }
+  ]
+}
