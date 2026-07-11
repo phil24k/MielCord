@@ -140,6 +140,27 @@ const THEME_PRESETS = {
       ok: "#55c96f"
     },
     swatches: ["#12c9ef", "#f7b7df", "#ffe45e"]
+  },
+  liquidGlass: {
+    label: "Liquid Glass",
+    description: "Dark refractive glass",
+    className: "theme-liquid-glass",
+    colors: {
+      preset: "liquidGlass",
+      bg: "#07090d",
+      panel: "#11161d",
+      panel2: "#1a2029",
+      panel3: "#29313c",
+      line: "#505b69",
+      text: "#f4f7fb",
+      muted: "#aab5c3",
+      honey: "#f3ca70",
+      teal: "#68d5c5",
+      berry: "#c49aff",
+      danger: "#ff6f7d",
+      ok: "#70d998"
+    },
+    swatches: ["#080b11", "#8fd8ff", "#c49aff"]
   }
 };
 
@@ -186,6 +207,7 @@ const state = {
   fullscreenVideoId: null,
   callCollapsed: false,
   mobileChannelsOpen: false,
+  pendingVoiceHandoff: null,
   streamQuality: "1080p",
   deviceTest: {
     micStream: null,
@@ -778,7 +800,7 @@ async function init() {
     state.user = me.user;
     state.appVersion = me.version || APP_VERSION;
     state.guilds = me.guilds || [];
-    connectWs();
+    connectWs(true);
     if (state.guilds.length) {
       await loadGuild(state.guilds[0].id, state.guilds[0].default_channel_id);
     } else {
@@ -1735,6 +1757,7 @@ async function loadGuild(guildId, preferredChannelId = null) {
   state.searchResults = [];
   if (state.activeChannelId) await loadMessages(state.activeChannelId);
   render();
+  processPendingVoiceHandoff();
 }
 
 async function loadMessages(channelId) {
@@ -1743,7 +1766,7 @@ async function loadMessages(channelId) {
   state.activeChannelId = channelId;
 }
 
-function connectWs() {
+function connectWs(activateDevice = false) {
   disconnectWs(false);
   const protocol = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${protocol}://${location.host}/ws`);
@@ -1753,8 +1776,10 @@ function connectWs() {
     state.wsLastPong = Date.now();
     startWsHeartbeat();
     wsSend("overlay:subscribe", {});
+    if (activateDevice) wsSend("device:activate", {});
   });
   ws.addEventListener("message", (event) => {
+    if (state.ws !== ws) return;
     try {
       const packet = JSON.parse(event.data);
       handleRealtime(packet.event, packet.payload || {});
@@ -1805,8 +1830,30 @@ function stopWsHeartbeat() {
 
 function restoreVoiceAfterReconnect() {
   if (!state.voice.channelId || state.ws?.readyState !== WebSocket.OPEN) return;
-  wsSend(state.voice.ghost ? "voice:ghost_join" : "voice:join", { channel_id: state.voice.channelId });
+  wsSend(state.voice.ghost ? "voice:ghost_join" : "voice:join", {
+    channel_id: state.voice.channelId,
+    resume: true
+  });
   if (!state.voice.ghost) wsSend("voice:state", voiceStatePayload());
+}
+
+async function processPendingVoiceHandoff() {
+  const handoff = state.pendingVoiceHandoff;
+  if (!handoff || !state.snapshot || state.ws?.readyState !== WebSocket.OPEN) return;
+  const channel = state.snapshot.channels.find(
+    (item) => item.id === Number(handoff.channel_id) && item.type === "voice"
+  );
+  if (!channel) return;
+  state.pendingVoiceHandoff = null;
+  try {
+    await joinVoice(channel.id, !!handoff.ghost);
+    notice(`Voice moved to this device: ${channel.name}`);
+  } catch (error) {
+    notice(
+      `Voice is still available in ${channel.name}. Tap the channel to join: ${error.message || error}`,
+      "error"
+    );
+  }
 }
 
 function handleRealtime(event, payload) {
@@ -1822,18 +1869,17 @@ function handleRealtime(event, payload) {
   } else if (event === "error") {
     notice(payload.message || "Realtime error", "error");
   } else if (event === "session:replaced") {
-    notice(payload.message || "Connecte ailleurs.", "error");
-    stopDeviceTests(false);
-    stopAllSpeakingMonitors();
-    leaveVoice(false);
-    state.user = null;
-    state.guilds = [];
-    state.snapshot = null;
-    state.messages = [];
-    state.voicePresence.clear();
-    publishOverlayState();
-    disconnectWs();
-    render();
+    notice(payload.message || "Another device connected. Your account stays signed in.");
+    if (state.voice.channelId) leaveVoice(false);
+  } else if (event === "voice:handoff") {
+    state.pendingVoiceHandoff = payload;
+    processPendingVoiceHandoff();
+  } else if (event === "voice:transferred") {
+    notice(payload.message || "Voice moved to another device. You are still signed in here.");
+    if (state.voice.channelId) leaveVoice(false);
+  } else if (event === "voice:resume_blocked") {
+    notice(payload.message || "Voice is active on another device.");
+    if (state.voice.channelId) leaveVoice(false);
   } else if (event === "overlay:snapshot") {
     state.overlayState = payload;
     window.MielcordOverlay = payload;
@@ -2373,7 +2419,7 @@ async function login(form) {
   state.user = result.user;
   state.appVersion = result.version || APP_VERSION;
   state.guilds = result.guilds || [];
-  connectWs();
+  connectWs(true);
   if (state.guilds.length) await loadGuild(state.guilds[0].id, state.guilds[0].default_channel_id);
   render();
 }
@@ -2384,7 +2430,7 @@ async function register(form) {
   state.user = result.user;
   state.appVersion = result.version || APP_VERSION;
   state.guilds = result.guilds || [];
-  connectWs();
+  connectWs(true);
   if (state.guilds.length) await loadGuild(state.guilds[0].id, state.guilds[0].default_channel_id);
   render();
 }
@@ -2399,6 +2445,7 @@ async function logout() {
   state.snapshot = null;
   state.messages = [];
   state.voicePresence.clear();
+  state.pendingVoiceHandoff = null;
   leaveVoice();
   render();
 }
