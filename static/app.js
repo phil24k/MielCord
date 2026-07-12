@@ -170,7 +170,8 @@ const state = {
   hostConfig: {
     privateMode: false,
     countryRestriction: false,
-    allowedCountries: []
+    allowedCountries: [],
+    rtcIceServers: [{ urls: ["stun:stun.l.google.com:19302"] }]
   },
   clientSettings: {
     ringAlerts: loadClientBool("ringAlerts", true),
@@ -208,7 +209,7 @@ const state = {
   callCollapsed: false,
   mobileChannelsOpen: false,
   pendingVoiceHandoff: null,
-  streamQuality: "1080p",
+  streamQuality: loadClientString("streamQuality", "1080p"),
   deviceTest: {
     micStream: null,
     micAudio: null,
@@ -232,7 +233,9 @@ const state = {
     screen: false,
     ghost: false,
     peers: new Map(),
-    pcs: new Map()
+    pcs: new Map(),
+    healthTimer: null,
+    videoFrameTimes: new Map()
   }
 };
 
@@ -255,7 +258,10 @@ const permissions = [
 ];
 
 const rtcConfig = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+  iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }],
+  iceCandidatePoolSize: 6,
+  bundlePolicy: "max-bundle",
+  rtcpMuxPolicy: "require"
 };
 
 
@@ -263,6 +269,7 @@ const icons = {
   login: '<svg viewBox="0 0 24 24"><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/><path d="M14 4h4a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3h-4"/></svg>',
   userPlus: '<svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6"/><path d="M22 11h-6"/></svg>',
   users: '<svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+  message: '<svg viewBox="0 0 24 24"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z"/></svg>',
   menu: '<svg viewBox="0 0 24 24"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/></svg>',
   grid: '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>',
   settings: '<svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.18.38.5.7.88.88.33.15.7.2 1.1.2H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51.92Z"/></svg>',
@@ -566,16 +573,21 @@ function renderAttachmentPreviewOnly() {
 }
 
 
+const STREAM_PROFILES = {
+  "720p": { width: 1280, height: 720, frameRate: 30, maxBitrate: 3_000_000 },
+  "1080p": { width: 1920, height: 1080, frameRate: 60, maxBitrate: 8_000_000 },
+  "1440p": { width: 2560, height: 1440, frameRate: 60, maxBitrate: 16_000_000 },
+  "4k": { width: 3840, height: 2160, frameRate: 60, maxBitrate: 32_000_000 },
+  "5k": { width: 5120, height: 2880, frameRate: 60, maxBitrate: 46_000_000 },
+  "source": { width: 7680, height: 4320, frameRate: 60, maxBitrate: 64_000_000 }
+};
+
+function streamProfile() {
+  return STREAM_PROFILES[state.streamQuality] || STREAM_PROFILES["1080p"];
+}
+
 function streamConstraints() {
-  const options = {
-    "720p": { width: 1280, height: 720, frameRate: 30 },
-    "1080p": { width: 1920, height: 1080, frameRate: 60 },
-    "1440p": { width: 2560, height: 1440, frameRate: 60 },
-    "4k": { width: 3840, height: 2160, frameRate: 60 },
-    "5k": { width: 5120, height: 2880, frameRate: 60 },
-    "source": { width: 7680, height: 4320, frameRate: 60 }
-  };
-  const picked = options[state.streamQuality] || options["1080p"];
+  const picked = streamProfile();
   return {
     width: { ideal: picked.width },
     height: { ideal: picked.height },
@@ -585,22 +597,46 @@ function streamConstraints() {
 
 function peerSettings(userId) {
   const key = Number(userId);
-  if (!state.peerSettings.has(key)) state.peerSettings.set(key, { muted: false, volume: 1 });
+  if (!state.peerSettings.has(key)) {
+    const stored = loadClientJson(`peerMedia:${key}`, {
+      muted: false,
+      volume: 1,
+      streamVolume: 1
+    });
+    state.peerSettings.set(key, {
+      muted: !!stored.muted,
+      volume: Math.max(0, Math.min(2, Number(stored.volume) || 0)),
+      streamVolume: Math.max(0, Math.min(2, Number(stored.streamVolume) || 0))
+    });
+  }
   return state.peerSettings.get(key);
+}
+
+function savePeerSettings(userId) {
+  saveClientJson(`peerMedia:${Number(userId)}`, peerSettings(userId));
 }
 
 function applyPeerMediaSettings(userId) {
   const settings = peerSettings(userId);
-  const video = document.getElementById(`video-peer-${userId}`);
-  if (video) {
-    video.volume = 0;
-    video.muted = true;
+  for (const videoId of [`video-peer-${userId}`, `video-screen-peer-${userId}`]) {
+    const video = document.getElementById(videoId);
+    if (video) {
+      video.volume = 0;
+      video.muted = true;
+      video.defaultMuted = true;
+    }
   }
   const audio = document.getElementById(`audio-peer-${userId}`);
   if (audio) {
     audio.volume = settings.volume;
     audio.muted = state.voice.deafened || settings.muted;
     applyAudioOutput(audio);
+  }
+  const streamAudio = document.getElementById(`audio-screen-peer-${userId}`);
+  if (streamAudio) {
+    streamAudio.volume = settings.streamVolume;
+    streamAudio.muted = state.voice.deafened || settings.muted;
+    applyAudioOutput(streamAudio);
   }
 }
 
@@ -818,8 +854,12 @@ async function loadPublicConfig() {
     state.hostConfig = {
       privateMode: !!config.private_mode_enabled,
       countryRestriction: !!config.country_restriction_enabled,
-      allowedCountries: config.allowed_country_codes || []
+      allowedCountries: config.allowed_country_codes || [],
+      rtcIceServers: Array.isArray(config.rtc_ice_servers) && config.rtc_ice_servers.length
+        ? config.rtc_ice_servers
+        : [{ urls: ["stun:stun.l.google.com:19302"] }]
     };
+    rtcConfig.iceServers = state.hostConfig.rtcIceServers;
   } catch (error) {
     notice(error.message || "Could not load host config", "error");
   }
@@ -1097,12 +1137,13 @@ function renderChatPane() {
 
 function renderMobileTopbar() {
   const channel = activeChannel();
+  const guild = activeGuild();
   const inVoice = !!state.voice.channelId;
   const showingCall = inVoice && !state.callCollapsed;
   const voiceCount = inVoice ? Math.max(1, voiceUsersFor(state.voice.channelId).length) : 0;
-  const title = showingCall ? state.voice.channelName : (channel?.name || "Mielcord");
+  const title = showingCall ? (guild?.name || "Mielcord") : (channel?.name || "Mielcord");
   const subtitle = showingCall
-    ? `${voiceCount} connected`
+    ? `${state.voice.channelName} · ${voiceCount} connected`
     : inVoice
       ? `In ${state.voice.channelName}`
       : `${state.online.size} online`;
@@ -1123,37 +1164,75 @@ function renderMobileTopbar() {
   `;
 }
 
+function renderCallControlDock() {
+  if (state.voice.ghost) {
+    return `
+      <footer class="call-control-dock ghost-controls">
+        <span class="ghost-pill">${icon("ghost")} Ghost listening</span>
+        <button class="call-control" data-action="toggleCallCollapse" title="Back to chat">${icon("message")}</button>
+        <button class="call-control danger" data-action="leaveVoice" title="Leave">${icon("phoneOff")}</button>
+      </footer>
+    `;
+  }
+  return `
+    <footer class="call-control-dock">
+      <button class="call-control ${state.voice.deafened ? "danger" : ""}" data-action="toggleDeafen" title="Deafen">${icon("headphones")}</button>
+      <button class="call-control ${state.voice.muted ? "danger" : ""}" data-action="toggleMute" title="Mute">${icon(state.voice.muted ? "micOff" : "mic")}</button>
+      <button class="call-control ${state.voice.camera ? "active" : ""}" data-action="toggleCamera" title="Camera">${icon("camera")}</button>
+      <button class="call-control ${state.voice.screen ? "active" : ""}" data-action="toggleScreen" title="Share screen">${icon("screen")}</button>
+      <button class="call-control call-chat-toggle" data-action="toggleCallCollapse" title="Back to chat">${icon("message")}</button>
+      <button class="call-control danger" data-action="leaveVoice" title="Leave">${icon("phoneOff")}</button>
+    </footer>
+  `;
+}
+
+function renderCollapsedCallControls() {
+  if (state.voice.ghost) {
+    return `
+      <div class="collapsed-call-actions">
+        <button class="icon-button active" title="Ghost listening">${icon("ghost")}</button>
+        <button class="icon-button" data-action="toggleCallCollapse" title="Open call">${icon("focus")}</button>
+        <button class="icon-button danger" data-action="leaveVoice" title="Leave">${icon("phoneOff")}</button>
+      </div>
+    `;
+  }
+  return `
+    <div class="collapsed-call-actions">
+      <button class="icon-button ${state.voice.muted ? "danger" : ""}" data-action="toggleMute" title="Mute">${icon(state.voice.muted ? "micOff" : "mic")}</button>
+      <button class="icon-button ${state.voice.deafened ? "danger" : ""}" data-action="toggleDeafen" title="Deafen">${icon("headphones")}</button>
+      <button class="icon-button" data-action="toggleCallCollapse" title="Open call">${icon("focus")}</button>
+      <button class="icon-button danger" data-action="leaveVoice" title="Leave">${icon("phoneOff")}</button>
+    </div>
+  `;
+}
+
 function renderCallWindow() {
   const peers = [...state.voice.peers.values()];
   const total = peers.length + (state.voice.ghost ? 0 : 1);
   return `
     <section class="call-window ${state.callCollapsed ? "collapsed" : ""}">
       <header class="call-window-header">
-        <div>
+        <div class="call-title">
           <strong>${escapeHtml(state.voice.channelName || "Voice")}</strong>
           <span>${total} connected</span>
         </div>
-        <div class="call-actions">
-          <select class="quality-select" data-action="streamQuality" title="Stream quality">
-            <option value="720p" ${state.streamQuality === "720p" ? "selected" : ""}>720p</option>
-            <option value="1080p" ${state.streamQuality === "1080p" ? "selected" : ""}>1080p</option>
-            <option value="1440p" ${state.streamQuality === "1440p" ? "selected" : ""}>1440p</option>
-            <option value="4k" ${state.streamQuality === "4k" ? "selected" : ""}>4K</option>
-            <option value="5k" ${state.streamQuality === "5k" ? "selected" : ""}>5K</option>
-            <option value="source" ${state.streamQuality === "source" ? "selected" : ""}>Full</option>
-          </select>
-          ${state.voice.ghost ? `<span class="ghost-pill">${icon("ghost")} Ghost listening</span>` : `
+        <div class="call-header-tools">
+          ${state.voice.ghost ? "" : `
+            <select class="quality-select" data-action="streamQuality" title="Stream quality">
+              <option value="720p" ${state.streamQuality === "720p" ? "selected" : ""}>720p</option>
+              <option value="1080p" ${state.streamQuality === "1080p" ? "selected" : ""}>1080p</option>
+              <option value="1440p" ${state.streamQuality === "1440p" ? "selected" : ""}>1440p</option>
+              <option value="4k" ${state.streamQuality === "4k" ? "selected" : ""}>4K</option>
+              <option value="5k" ${state.streamQuality === "5k" ? "selected" : ""}>5K</option>
+              <option value="source" ${state.streamQuality === "source" ? "selected" : ""}>Full</option>
+            </select>
             ${state.voice.screen ? `<button class="icon-button" data-action="changeScreen" title="Change shared window">${icon("window")}</button>` : ""}
-            <button class="icon-button ${state.voice.muted ? "danger" : ""}" data-action="toggleMute" title="Mute">${icon(state.voice.muted ? "micOff" : "mic")}</button>
-          <button class="icon-button ${state.voice.deafened ? "danger" : ""}" data-action="toggleDeafen" title="Deafen">${icon("headphones")}</button>
-            <button class="icon-button ${state.voice.camera ? "active" : ""}" data-action="toggleCamera" title="Camera">${icon("camera")}</button>
-            <button class="icon-button ${state.voice.screen ? "active" : ""}" data-action="toggleScreen" title="Screen">${icon("screen")}</button>
           `}
-          <button class="icon-button" data-action="toggleCallCollapse" title="Collapse call">${state.callCollapsed ? icon("focus") : icon("close")}</button>
-          <button class="icon-button danger" data-action="leaveVoice" title="Leave">${icon("phoneOff")}</button>
+          <button class="icon-button" data-open-modal="memberDirectory" title="Members">${icon("users")}</button>
         </div>
+        ${state.callCollapsed ? renderCollapsedCallControls() : ""}
       </header>
-      ${state.callCollapsed ? "" : renderVoiceStage()}
+      ${state.callCollapsed ? "" : `${renderVoiceStage()}${renderCallControlDock()}`}
     </section>
   `;
 }
@@ -1178,41 +1257,118 @@ function renderSearchResults() {
 
 function videoGridLayout(count) {
   const total = Math.max(1, Number(count) || 1);
-  const shell = document.querySelector(".app-shell");
-  const pane = document.querySelector(".chat-pane") || shell || document.documentElement;
-  const channelPane = document.querySelector(".channel-pane");
-  const paneWidth = pane.clientWidth || Math.max(1, window.innerWidth - (channelPane?.clientWidth || 0));
+  const pane = document.querySelector(".chat-pane") || document.documentElement;
+  const paneWidth = pane.clientWidth || window.innerWidth;
   const paneHeight = pane.clientHeight || window.innerHeight;
-  const reserved = 112;
-  const stageWidth = Math.max(1, paneWidth - 28);
+  const reserved = 170;
+  const stageWidth = Math.max(1, paneWidth - 32);
   const stageHeight = Math.max(1, paneHeight - reserved);
-  const ratio = Math.max(0.45, Math.min(3.2, stageWidth / stageHeight));
+  const ratio = Math.max(0.5, Math.min(3.4, stageWidth / stageHeight));
   const cols = Math.max(1, Math.min(total, Math.ceil(Math.sqrt(total * ratio))));
   const rows = Math.max(1, Math.ceil(total / cols));
   return { cols, rows };
 }
 
+function callParticipants() {
+  const participants = [];
+  if (!state.voice.ghost) {
+    participants.push({
+      id: "local",
+      user: state.user,
+      media: {
+        muted: state.voice.muted,
+        camera: state.voice.camera,
+        screen: state.voice.screen,
+        local: true
+      }
+    });
+  }
+  for (const peer of state.voice.peers.values()) {
+    participants.push({
+      id: "peer-" + peer.user.id,
+      user: peer.user,
+      media: peer.state || {}
+    });
+  }
+  return participants;
+}
+
+function activeScreenShares() {
+  const shares = [];
+  if (!state.voice.ghost && state.voice.screen) {
+    shares.push({
+      id: "screen-local",
+      user: state.user,
+      media: {
+        muted: state.voice.muted,
+        camera: state.voice.camera,
+        screen: true,
+        stream_quality: state.streamQuality,
+        local: true
+      }
+    });
+  }
+  for (const peer of state.voice.peers.values()) {
+    if (!peer.state?.screen) continue;
+    shares.push({
+      id: "screen-peer-" + peer.user.id,
+      user: peer.user,
+      media: peer.state || {}
+    });
+  }
+  return shares;
+}
+
 function renderVoiceStage() {
   if (!state.voice.channelId) return "";
-  const peers = [...state.voice.peers.values()];
-  const total = peers.length + (state.voice.ghost ? 0 : 1);
-  const layout = videoGridLayout(total || 1);
-  const hasFocus = !!state.focusedVideoId && !state.fullscreenVideoId;
-  const focusSideCount = Math.max(1, total - 1);
+  const participants = callParticipants();
+  const shares = activeScreenShares();
+  const dominant = shares.find((share) => share.id === state.focusedVideoId) || shares[0] || null;
+
+  if (dominant) {
+    const secondaryShares = shares.filter((share) => share.id !== dominant.id);
+    const stripCount = Math.max(1, participants.length + secondaryShares.length);
+    const compactRows = window.matchMedia("(max-width: 820px)").matches && stripCount > 4
+      ? 2
+      : stripCount > 8
+        ? 2
+        : 1;
+    const compactCols = Math.ceil(stripCount / compactRows);
+    return `
+      <section class="voice-stage has-screen">
+        <div class="stream-layout">
+          <div class="stream-spotlight">
+            ${renderVideoTile(dominant.id, dominant.user, dominant.media, {
+              source: "screen",
+              spotlight: true
+            })}
+          </div>
+          <div class="participant-strip" style="--strip-count:${stripCount}; --strip-cols:${compactCols}; --strip-rows:${compactRows};">
+            ${participants.map((entry) => renderVideoTile(entry.id, entry.user, entry.media, {
+              source: "camera",
+              compact: true
+            })).join("")}
+            ${secondaryShares.map((entry) => renderVideoTile(entry.id, entry.user, entry.media, {
+              source: "screen",
+              compact: true,
+              preview: true
+            })).join("")}
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  const layout = videoGridLayout(participants.length || 1);
+  const hasFocus = !!state.focusedVideoId && !state.fullscreenVideoId &&
+    participants.some((entry) => entry.id === state.focusedVideoId);
   return `
-    <section class="voice-stage ${state.voice.ghost ? "ghost-stage" : ""}">
-      <div class="stage-header">
-        <strong>${escapeHtml(state.voice.channelName)}</strong>
-        <span>${state.voice.ghost ? `${peers.length} observed` : `${peers.length + 1} connected`}</span>
-      </div>
-      <div class="video-grid ${hasFocus ? "has-focus" : ""}" style="--video-cols:${layout.cols}; --video-rows:${layout.rows}; --focus-side-count:${focusSideCount};">
-        ${state.voice.ghost ? "" : renderVideoTile("local", state.user, {
-          muted: state.voice.muted,
-          camera: state.voice.camera,
-          screen: state.voice.screen,
-          local: true
-        })}
-        ${peers.map((peer) => renderVideoTile(`peer-${peer.user.id}`, peer.user, peer.state || {})).join("")}
+    <section class="voice-stage participants-only">
+      <div class="video-grid participant-grid ${hasFocus ? "has-focus" : ""}"
+        style="--video-cols:${layout.cols}; --video-rows:${layout.rows}; --participant-count:${participants.length};">
+        ${participants.map((entry) => renderVideoTile(entry.id, entry.user, entry.media, {
+          source: "camera"
+        })).join("")}
       </div>
     </section>
   `;
@@ -1234,29 +1390,64 @@ function renderAvatarFallback(person) {
   return url ? `<img src="${escapeHtml(url)}" alt="">` : initials(name);
 }
 
-function renderVideoTile(id, user, media) {
-  const userId = id === "local" ? state.user.id : Number(String(id).replace("peer-", ""));
+function renderVideoTile(id, user, media, options = {}) {
+  const local = id === "local" || id === "screen-local";
+  const match = String(id).match(/peer-(\d+)$/);
+  const userId = local ? Number(state.user?.id || 0) : Number(match?.[1] || 0);
+  const source = options.source === "screen" ? "screen" : "camera";
   const focused = state.focusedVideoId === id;
   const fullscreened = state.fullscreenVideoId === id;
-  const isSpeaking = state.speaking.has(userId) || !!media.speaking;
-  const tileClass = `video-tile ${focused ? "focused" : ""} ${fullscreened ? "browser-fullscreen" : ""} ${media.screen ? "screening" : ""} ${isSpeaking ? "speaking" : ""}`.trim();
+  const isSpeaking = source === "camera" &&
+    (state.speaking.has(userId) || !!media.speaking);
+  const sourceActive = source === "screen" ? !!media.screen : !!media.camera;
+  const tileClass = [
+    "video-tile",
+    source === "screen" ? "stream-tile screening" : "participant-tile",
+    options.compact ? "compact-tile" : "",
+    options.spotlight ? "spotlight-tile" : "",
+    options.preview ? "stream-preview-tile" : "",
+    focused ? "focused" : "",
+    fullscreened ? "browser-fullscreen" : "",
+    isSpeaking ? "speaking" : ""
+  ].filter(Boolean).join(" ");
   const badges = [
-    media.muted ? "muted" : "",
-    media.camera ? "camera" : "",
-    media.screen ? "screen" : "",
-    media.local ? "you" : ""
+    media.muted && source === "camera" ? "muted" : "",
+    source === "screen" ? (media.stream_quality || "screen") : "",
+    local ? "you" : ""
   ].filter(Boolean);
+  const width = Number(media.screen_width || 0);
+  const height = Number(media.screen_height || 0);
+  const aspect = source === "screen" && width > 0 && height > 0
+    ? Math.max(0.25, Math.min(6, width / height))
+    : 16 / 9;
+
   return `
-    <article class="${tileClass}" data-video-id="${id}" data-user-id="${userId}" ${!media.local ? `data-peer-user-id="${userId}"` : ""}>
-      <video id="video-${id}" autoplay playsinline ${media.local ? "muted" : ""}></video>
-      <div class="video-fallback" style="--avatar:${escapeHtml(user.avatar_color || "#d99a23")}">${renderAvatarFallback(user)}</div>
+    <article class="${tileClass}" data-video-id="${id}" data-user-id="${userId}"
+      data-media-source="${source}" style="--stream-aspect:${aspect};"
+      ${!local ? `data-peer-user-id="${userId}"` : ""}>
+      <video id="video-${id}" autoplay playsinline muted></video>
+      <div class="video-fallback" style="--avatar:${escapeHtml(user.avatar_color || "#d99a23")}">
+        ${renderAvatarFallback(user)}
+      </div>
+      ${sourceActive ? `<div class="media-kind-badge" title="${source === "screen" ? "Screen share" : "Camera"}">${icon(source === "screen" ? "screen" : "camera")}</div>` : ""}
+      <div class="media-status" data-media-status></div>
       <footer>
         <strong>${escapeHtml(user.display_name || user.username)}</strong>
-        <span>${badges.join(" ")}</span>
+        <span>${escapeHtml(badges.join(" "))}</span>
       </footer>
       <div class="video-actions">
-        <button class="icon-button ${focused ? "active" : ""}" data-action="focusVideo" data-video-id="${id}" title="${focused ? "Back to grid" : "Large tile"}" aria-label="${focused ? "Back to grid" : "Large tile"}">${icon(focused ? "grid" : "window")}</button>
-        <button class="icon-button ${fullscreened ? "active" : ""}" data-action="fullscreenVideo" data-video-id="${id}" title="${fullscreened ? "Exit fullscreen" : "Browser fullscreen"}" aria-label="${fullscreened ? "Exit fullscreen" : "Browser fullscreen"}">${icon("fullscreen")}</button>
+        ${options.compact && source === "camera" ? "" : `
+          <button class="icon-button ${focused ? "active" : ""}" data-action="focusVideo" data-video-id="${id}"
+            title="${focused ? "Back to layout" : source === "screen" ? "Show this stream" : "Large tile"}"
+            aria-label="${focused ? "Back to layout" : source === "screen" ? "Show this stream" : "Large tile"}">
+            ${icon(focused ? "grid" : "window")}
+          </button>
+        `}
+        <button class="icon-button ${fullscreened ? "active" : ""}" data-action="fullscreenVideo" data-video-id="${id}"
+          title="${fullscreened ? "Exit fullscreen" : "Browser fullscreen"}"
+          aria-label="${fullscreened ? "Exit fullscreen" : "Browser fullscreen"}">
+          ${icon("fullscreen")}
+        </button>
       </div>
     </article>
   `;
@@ -1937,8 +2128,8 @@ function handleRealtime(event, payload) {
     setSpeaking(payload.user_id, !!payload.speaking);
   } else if (event === "voice:state") {
     setVoicePresence(payload.channel_id, payload.user || state.voice.peers.get(payload.user_id)?.user || state.user, payload.state || {});
-    const peer = state.voice.peers.get(payload.user_id);
-    if (peer) peer.state = payload.state || {};
+    const peer = state.voice.peers.get(Number(payload.user_id));
+    if (peer) updatePeerMediaState(peer, payload.state || {});
     if (payload.user_id === state.user.id) {
       state.voice.muted = !!payload.state?.muted;
       state.voice.camera = !!payload.state?.camera;
@@ -2248,8 +2439,9 @@ document.addEventListener("change", (event) => {
     setAttachedFile(file);
   }
   if (event.target.matches('[data-action="streamQuality"]')) {
-    state.streamQuality = event.target.value;
-    if (state.voice.screen) notice("Quality applies next time you change the shared window.");
+    state.streamQuality = STREAM_PROFILES[event.target.value] ? event.target.value : "1080p";
+    saveClientString("streamQuality", state.streamQuality);
+    safe(applyActiveStreamQuality);
   }
   if (event.target.matches('[data-action="toggleRingAlerts"]')) {
     setRingAlerts(event.target.checked);
@@ -2269,6 +2461,13 @@ document.addEventListener("input", (event) => {
   if (event.target.matches('[data-peer-volume]')) {
     const userId = Number(event.target.dataset.peerVolume);
     peerSettings(userId).volume = Number(event.target.value) / 100;
+    savePeerSettings(userId);
+    applyPeerMediaSettings(userId);
+  }
+  if (event.target.matches('[data-peer-stream-volume]')) {
+    const userId = Number(event.target.dataset.peerStreamVolume);
+    peerSettings(userId).streamVolume = Number(event.target.value) / 100;
+    savePeerSettings(userId);
     applyPeerMediaSettings(userId);
   }
 });
@@ -2279,8 +2478,52 @@ document.addEventListener("contextmenu", (event) => {
   const userId = Number(target.dataset.peerUserId);
   if (!userId || userId === state.user?.id) return;
   event.preventDefault();
-  showPeerMenu(event, userId);
+  showPeerMenu(event, userId, target.dataset.mediaSource || "voice");
 });
+
+let peerMenuLongPress = null;
+let peerMenuPressPoint = null;
+
+function cancelPeerMenuLongPress() {
+  if (peerMenuLongPress) clearTimeout(peerMenuLongPress);
+  peerMenuLongPress = null;
+  peerMenuPressPoint = null;
+}
+
+document.addEventListener("pointerdown", (event) => {
+  if (event.pointerType === "mouse") return;
+  const target = event.target.closest("[data-peer-user-id]");
+  const userId = Number(target?.dataset.peerUserId || 0);
+  if (!target || !userId || userId === state.user?.id) return;
+  cancelPeerMenuLongPress();
+  peerMenuPressPoint = {
+    pointerId: event.pointerId,
+    clientX: event.clientX,
+    clientY: event.clientY,
+    target,
+    userId
+  };
+  peerMenuLongPress = setTimeout(() => {
+    const press = peerMenuPressPoint;
+    peerMenuLongPress = null;
+    peerMenuPressPoint = null;
+    if (!press?.target.isConnected) return;
+    showPeerMenu(press, press.userId, press.target.dataset.mediaSource || "voice");
+    try { navigator.vibrate?.(18); } catch {}
+  }, 520);
+}, { passive: true });
+
+document.addEventListener("pointermove", (event) => {
+  const press = peerMenuPressPoint;
+  if (!press || press.pointerId !== event.pointerId) return;
+  if (Math.hypot(event.clientX - press.clientX, event.clientY - press.clientY) > 12) {
+    cancelPeerMenuLongPress();
+  }
+}, { passive: true });
+
+for (const eventName of ["pointerup", "pointercancel"]) {
+  document.addEventListener(eventName, cancelPeerMenuLongPress, { passive: true });
+}
 
 document.addEventListener("click", (event) => {
   if (!event.target.closest(".peer-menu") && !event.target.closest("[data-peer-user-id]")) closePeerMenu();
@@ -2348,6 +2591,7 @@ function closePeerMenu() {
 function toggleLocalPeerMute(userId) {
   const settings = peerSettings(userId);
   settings.muted = !settings.muted;
+  savePeerSettings(userId);
   applyPeerMediaSettings(userId);
   closePeerMenu();
   render();
@@ -2381,19 +2625,23 @@ async function adminTempBanMember(userId) {
   notice(`User tempbanned for ${Math.max(1, Math.min(hours || 24, 8760))}h.`);
 }
 
-function showPeerMenu(event, userId) {
+function showPeerMenu(event, userId, mediaSource = "voice") {
   closePeerMenu();
   const member = state.snapshot?.members.find((item) => item.user_id === userId);
   const peer = [...state.voicePresence.values()].flatMap((room) => [...room.values()]).find((entry) => entry.user.id === userId);
   const label = member?.display_name || peer?.user?.display_name || peer?.user?.username || "User";
   const settings = peerSettings(userId);
+  const streamMenu = mediaSource === "screen";
   const menu = document.createElement("div");
   menu.className = "peer-menu";
-  menu.style.left = `${Math.min(event.clientX, window.innerWidth - 260)}px`;
-  menu.style.top = `${Math.min(event.clientY, window.innerHeight - 190)}px`;
   menu.innerHTML = `
     <strong>${escapeHtml(label)}</strong>
-    <label>${iconText("volume", "Volume")}
+    ${streamMenu ? `
+      <label>${iconText("screen", "Stream volume")}
+        <input type="range" min="0" max="200" value="${Math.round(settings.streamVolume * 100)}" data-peer-stream-volume="${userId}">
+      </label>
+    ` : ""}
+    <label>${iconText("volume", "Voice volume")}
       <input type="range" min="0" max="200" value="${Math.round(settings.volume * 100)}" data-peer-volume="${userId}">
     </label>
     <button data-action="localMutePeer" data-user-id="${userId}">${iconText(settings.muted ? "mic" : "micOff", settings.muted ? "Unmute locally" : "Mute locally")}</button>
@@ -2404,6 +2652,10 @@ function showPeerMenu(event, userId) {
     ${hasPermission("ban_members") ? `<button class="danger" data-action="adminBanMember" data-user-id="${userId}">${iconText("trash", "Ban from site")}</button>` : ""}
   `;
   document.body.appendChild(menu);
+  const menuWidth = menu.offsetWidth || 250;
+  const menuHeight = menu.offsetHeight || 190;
+  menu.style.left = `${Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8))}px`;
 }
 
 async function safe(fn) {  try {
@@ -2620,10 +2872,18 @@ async function loadAudit() {
 
 
 function voiceStatePayload() {
+  const screenTrack = state.voice.screenStream?.getVideoTracks()[0] || null;
+  const screenSettings = screenTrack?.getSettings?.() || {};
   return {
     muted: state.voice.muted,
     camera: state.voice.camera,
-    screen: state.voice.screen
+    screen: state.voice.screen,
+    camera_stream_id: state.voice.cameraStream?.id || "",
+    screen_stream_id: state.voice.screenStream?.id || "",
+    screen_width: Math.round(Number(screenSettings.width || 0)),
+    screen_height: Math.round(Number(screenSettings.height || 0)),
+    screen_frame_rate: Math.round(Number(screenSettings.frameRate || 0)),
+    stream_quality: state.voice.screen ? state.streamQuality : ""
   };
 }
 
@@ -2780,21 +3040,137 @@ async function ensureAudio() {
 
 async function restartLocalAudio() {
   const oldStream = state.voice.localAudio;
-  oldStream?.getTracks().forEach((track) => track.stop());
   state.voice.localAudio = null;
   const stream = await ensureAudio();
-  const track = stream.getAudioTracks()[0] || null;
-  for (const pc of state.voice.pcs.values()) {
-    const sender = pc.getSenders().find((item) => item.track?._mielcordSource === "audio" || item.track?.kind === "audio");
-    if (sender) {
-      await sender.replaceTrack(track);
-      if (track) track._mielcordSource = "audio";
-    } else if (track) {
-      pc.addTrack(track, stream);
-    }
-  }
+  await syncLocalMediaToAllPeers();
+  oldStream?.getTracks().forEach((track) => track.stop());
   applyLocalMuteTracks();
   publishVoiceState();
+}
+
+function createPeerRecord(user, mediaState = {}, channelId = state.voice.channelId) {
+  const now = performance.now();
+  return {
+    user,
+    state: { ...mediaState },
+    channelId,
+    streams: {
+      audio: new MediaStream(),
+      screenAudio: new MediaStream(),
+      camera: new MediaStream(),
+      screen: new MediaStream()
+    },
+    trackMeta: new Map(),
+    health: {
+      expectedSince: { camera: now, screen: now },
+      lastHealthyAt: now,
+      lastRecoveryAt: 0,
+      recoveryAttempts: 0,
+      previousFrames: 0,
+      previousBytes: 0
+    }
+  };
+}
+
+function ensurePeerMedia(peer) {
+  if (!peer.streams) peer.streams = {};
+  for (const source of ["audio", "screenAudio", "camera", "screen"]) {
+    if (!peer.streams[source]) peer.streams[source] = new MediaStream();
+  }
+  if (!peer.trackMeta) peer.trackMeta = new Map();
+  if (!peer.health) {
+    const now = performance.now();
+    peer.health = {
+      expectedSince: { camera: now, screen: now },
+      lastHealthyAt: now,
+      lastRecoveryAt: 0,
+      recoveryAttempts: 0,
+      previousFrames: 0,
+      previousBytes: 0
+    };
+  }
+  return peer;
+}
+
+function liveTracks(stream, kind = null) {
+  if (!stream) return [];
+  return stream.getTracks().filter((track) => track.readyState === "live" && (!kind || track.kind === kind));
+}
+
+function removeTrackFromPeerStreams(peer, track) {
+  ensurePeerMedia(peer);
+  Object.values(peer.streams).forEach((stream) => {
+    if (stream.getTracks().includes(track)) stream.removeTrack(track);
+  });
+}
+
+function moveRemoteTrack(peer, track, source) {
+  ensurePeerMedia(peer);
+  removeTrackFromPeerStreams(peer, track);
+  const resolvedSource = track.kind === "audio"
+    ? (source === "screen-audio" ? "screen-audio" : "audio")
+    : (source === "screen" ? "screen" : "camera");
+  const target = resolvedSource === "screen-audio"
+    ? peer.streams.screenAudio
+    : peer.streams[resolvedSource];
+  if (!target.getTracks().includes(track)) target.addTrack(track);
+  const meta = peer.trackMeta.get(track.id) || { track, streamId: "" };
+  meta.source = resolvedSource;
+  peer.trackMeta.set(track.id, meta);
+}
+
+function classifyRemoteTrack(peer, track, streamId = "", negotiatedSource = "") {
+  if (track.kind === "audio") {
+    if (negotiatedSource === "screen-audio") return "screen-audio";
+    if (streamId && streamId === peer.state?.screen_stream_id) return "screen-audio";
+    return "audio";
+  }
+  if (negotiatedSource === "screen" || negotiatedSource === "camera") return negotiatedSource;
+  if (streamId && streamId === peer.state?.screen_stream_id) return "screen";
+  if (streamId && streamId === peer.state?.camera_stream_id) return "camera";
+
+  const screenOccupied = [...peer.trackMeta.values()].some(
+    (meta) => meta.source === "screen" && meta.track?.readyState === "live"
+  );
+  const cameraOccupied = [...peer.trackMeta.values()].some(
+    (meta) => meta.source === "camera" && meta.track?.readyState === "live"
+  );
+  if (peer.state?.screen && !screenOccupied) return "screen";
+  if (peer.state?.camera && !cameraOccupied) return "camera";
+  return peer.state?.screen && !peer.state?.camera ? "screen" : "camera";
+}
+
+function reconcilePeerMedia(peer) {
+  ensurePeerMedia(peer);
+  for (const [trackId, meta] of peer.trackMeta) {
+    if (!meta.track || meta.track.readyState === "ended") {
+      if (meta.track) removeTrackFromPeerStreams(peer, meta.track);
+      peer.trackMeta.delete(trackId);
+      continue;
+    }
+    const source = classifyRemoteTrack(peer, meta.track, meta.streamId, meta.source);
+    moveRemoteTrack(peer, meta.track, source);
+  }
+}
+
+function updatePeerMediaState(peer, nextState = {}) {
+  ensurePeerMedia(peer);
+  const now = performance.now();
+  const previousScreen = !!peer.state?.screen;
+  if (!peer.state?.camera && nextState.camera) peer.health.expectedSince.camera = now;
+  if (!previousScreen && nextState.screen) peer.health.expectedSince.screen = now;
+  peer.state = { ...nextState };
+  reconcilePeerMedia(peer);
+
+  if (previousScreen && !nextState.screen) {
+    const videoId = "screen-peer-" + peer.user.id;
+    state.voice.videoFrameTimes.delete(videoId);
+    if (state.focusedVideoId === videoId) state.focusedVideoId = null;
+    if (state.fullscreenVideoId === videoId) {
+      state.fullscreenVideoId = null;
+      if (documentFullscreenElement()) exitDocumentFullscreen().catch(() => {});
+    }
+  }
 }
 
 function handleVoiceJoined(payload) {
@@ -2804,6 +3180,7 @@ function handleVoiceJoined(payload) {
   state.voice.peers.clear();
   state.voice.pcs.forEach((pc) => pc.close());
   state.voice.pcs.clear();
+  stopMediaHealthMonitor();
   stopAllSpeakingMonitors();
   if (state.voice.ghost) {
     state.voice.muted = true;
@@ -2812,167 +3189,402 @@ function handleVoiceJoined(payload) {
     state.voice.localAudio?.getTracks().forEach((track) => track.stop());
     state.voice.localAudio = null;
   } else {
-    setVoicePresence(state.voice.channelId, state.user, { muted: state.voice.muted, camera: state.voice.camera, screen: state.voice.screen });
+    setVoicePresence(state.voice.channelId, state.user, voiceStatePayload());
   }
   for (const peer of payload.peers || []) {
     setVoicePresence(state.voice.channelId, peer.user, peer.state || {});
-    state.voice.peers.set(peer.user.id, {
-      user: peer.user,
-      state: peer.state || {},
-      channelId: state.voice.channelId,
-      stream: new MediaStream()
-    });
+    state.voice.peers.set(
+      Number(peer.user.id),
+      createPeerRecord(peer.user, peer.state || {}, state.voice.channelId)
+    );
   }
-  if (!state.voice.ghost) playTone("join");
+  if (!state.voice.ghost) {
+    playTone("join");
+    publishVoiceState();
+  }
   render();
+  startMediaHealthMonitor();
   for (const peer of payload.peers || []) {
-    createPeer(peer.user.id, true).catch((error) => notice(error.message, "error"));
+    createPeer(Number(peer.user.id), true).catch((error) => notice(error.message, "error"));
   }
 }
 
 function handlePeerJoined(payload) {
+  const userId = Number(payload.user.id);
   setVoicePresence(payload.channel_id, payload.user, payload.state || {});
-  if (!state.voice.ghost && payload.user.id !== state.user.id) playTone("join");
-  if (payload.channel_id !== state.voice.channelId || payload.user.id === state.user.id) {
+  if (!state.voice.ghost && userId !== state.user.id) playTone("join");
+  if (payload.channel_id !== state.voice.channelId || userId === state.user.id) {
     render();
     return;
   }
-  if (!state.voice.peers.has(payload.user.id)) {
-    state.voice.peers.set(payload.user.id, {
-      user: payload.user,
-      state: payload.state || {},
-      channelId: payload.channel_id,
-      stream: new MediaStream()
-    });
+  const existing = state.voice.peers.get(userId);
+  if (existing) {
+    existing.user = payload.user;
+    updatePeerMediaState(existing, payload.state || {});
+  } else {
+    state.voice.peers.set(
+      userId,
+      createPeerRecord(payload.user, payload.state || {}, payload.channel_id)
+    );
   }
   render();
-  if (state.voice.ghost) createPeer(payload.user.id, true).catch((error) => notice(error.message, "error"));
+  if (state.voice.ghost) {
+    createPeer(userId, true).catch((error) => notice(error.message, "error"));
+  }
 }
 
 function closePeerConnection(userId) {
-  const pc = state.voice.pcs.get(Number(userId));
-  if (pc?._mielcordRestartTimer) clearTimeout(pc._mielcordRestartTimer);
+  const key = Number(userId);
+  const pc = state.voice.pcs.get(key);
+  const meta = pc?._mielcord;
+  if (meta?.restartTimer) clearTimeout(meta.restartTimer);
+  if (meta?.negotiationTimer) clearTimeout(meta.negotiationTimer);
   if (pc) pc.close();
-  state.voice.pcs.delete(Number(userId));
+  state.voice.pcs.delete(key);
 }
 
 function restartPeerIce(userId, pc, delay = 0) {
   if (!pc || pc.signalingState === "closed") return;
-  if (pc._mielcordRestartTimer) clearTimeout(pc._mielcordRestartTimer);
-  pc._mielcordRestartTimer = setTimeout(() => {
+  const meta = pc._mielcord;
+  if (!meta) return;
+  if (meta.restartTimer) clearTimeout(meta.restartTimer);
+  meta.restartTimer = setTimeout(() => {
     if (!state.voice.channelId || pc.signalingState === "closed") return;
-    try { pc.restartIce?.(); } catch {}
+    const now = Date.now();
+    if (now - meta.lastIceRestartAt < 6000) return;
+    meta.lastIceRestartAt = now;
     negotiate(userId, true).catch(() => {});
   }, delay);
 }
 
 function removePeer(userId) {
-  closePeerConnection(userId);
-  state.voice.peers.delete(userId);
-  stopSpeakingMonitor(userId);
-  const videoId = `peer-${userId}`;
-  if (state.fullscreenVideoId === videoId) {
-    state.fullscreenVideoId = null;
-    if (documentFullscreenElement()) exitDocumentFullscreen().catch(() => {});
+  const key = Number(userId);
+  closePeerConnection(key);
+  state.voice.peers.delete(key);
+  stopSpeakingMonitor(key);
+  for (const videoId of ["peer-" + key, "screen-peer-" + key]) {
+    state.voice.videoFrameTimes.delete(videoId);
+    if (state.fullscreenVideoId === videoId) {
+      state.fullscreenVideoId = null;
+      if (documentFullscreenElement()) exitDocumentFullscreen().catch(() => {});
+    }
+    if (state.focusedVideoId === videoId) state.focusedVideoId = null;
   }
-  if (state.focusedVideoId === videoId) state.focusedVideoId = null;
   render();
 }
 
-async function createPeer(userId, initiator = false) {
-  if (state.voice.pcs.has(userId)) return state.voice.pcs.get(userId);
-  const pc = new RTCPeerConnection(rtcConfig);
-  state.voice.pcs.set(userId, pc);
-  const peer = state.voice.peers.get(userId);
-  if (peer && !peer.stream) peer.stream = new MediaStream();
-
-  addLocalTracks(pc);
-
-  pc.addEventListener("icecandidate", (event) => {
-    if (event.candidate) {
-      wsSend("rtc:signal", {
-        channel_id: state.voice.channelId,
-        target_user_id: userId,
-        signal: { candidate: event.candidate }
-      });
-    }
-  });
-
-  pc.addEventListener("track", (event) => {
-    const currentPeer = state.voice.peers.get(userId);
-    if (!currentPeer) return;
-    if (!currentPeer.stream) currentPeer.stream = new MediaStream();
-    currentPeer.stream.addTrack(event.track);
-    if (event.track.kind === "audio") {
-      event.track.addEventListener("ended", () => stopSpeakingMonitor(userId));
-      startSpeakingMonitor(userId, currentPeer.stream);
-    }
-    syncMediaElements();
-  });
-
-  pc.addEventListener("iceconnectionstatechange", () => {
-    if (pc.iceConnectionState === "failed") restartPeerIce(userId, pc, 0);
-    if (pc.iceConnectionState === "disconnected") restartPeerIce(userId, pc, 2500);
-  });
-
-  pc.addEventListener("connectionstatechange", () => {
-    if (pc.connectionState === "failed") restartPeerIce(userId, pc, 0);
-    if (pc.connectionState === "disconnected") restartPeerIce(userId, pc, 2500);
-  });
-
-  if (initiator) await negotiate(userId);
-  return pc;
-}
-
-function addLocalTracks(pc) {
-  const streams = [state.voice.localAudio, state.voice.cameraStream, state.voice.screenStream].filter(Boolean);
-  for (const stream of streams) {
+function localTrackDescriptors() {
+  const descriptors = [];
+  const append = (stream, source) => {
+    if (!stream) return;
     for (const track of stream.getTracks()) {
-      if (!pc.getSenders().some((sender) => sender.track === track)) {
-        pc.addTrack(track, stream);
-      }
+      const resolvedSource = source === "screen" && track.kind === "audio" ? "screen-audio" : source;
+      track._mielcordSource = resolvedSource;
+      descriptors.push({ track, stream, source: resolvedSource });
     }
-  }
+  };
+  append(state.voice.localAudio, "audio");
+  append(state.voice.cameraStream, "camera");
+  append(state.voice.screenStream, "screen");
+  return descriptors.filter(({ track }) => track.readyState === "live");
 }
 
-async function negotiate(userId, iceRestart = false) {
-  const pc = state.voice.pcs.get(userId) || await createPeer(userId, false);
-  addLocalTracks(pc);
-  const offer = await pc.createOffer({
-    offerToReceiveAudio: true,
-    offerToReceiveVideo: true,
-    iceRestart
-  });
-  await pc.setLocalDescription(offer);
+function screenTrackHint(track) {
+  const surface = track?.getSettings?.().displaySurface || "";
+  return surface === "browser" || surface === "window" ? "detail" : "motion";
+}
+
+async function configureSender(sender, source) {
+  const track = sender?.track;
+  if (!sender || !track) return;
+  try {
+    if ("contentHint" in track) {
+      if (source === "audio") track.contentHint = "speech";
+      if (source === "camera") track.contentHint = "motion";
+      if (source === "screen") track.contentHint = screenTrackHint(track);
+      if (source === "screen-audio") track.contentHint = "music";
+    }
+  } catch {}
+
+  let parameters;
+  try {
+    parameters = sender.getParameters();
+  } catch {
+    return;
+  }
+  if (!parameters.encodings?.length) return;
+  const encoding = parameters.encodings[0];
+  if (track.kind === "audio") {
+    encoding.maxBitrate = source === "screen-audio" ? 192_000 : 128_000;
+    encoding.priority = "high";
+    encoding.networkPriority = "high";
+  } else if (source === "screen") {
+    const profile = streamProfile();
+    const peerFactor = Math.max(1, Math.sqrt(Math.max(1, state.voice.peers.size)));
+    encoding.maxBitrate = Math.max(2_500_000, Math.round(profile.maxBitrate / peerFactor));
+    encoding.maxFramerate = profile.frameRate;
+    encoding.scaleResolutionDownBy = 1;
+    encoding.priority = "high";
+    encoding.networkPriority = "high";
+    parameters.degradationPreference = screenTrackHint(track) === "detail"
+      ? "maintain-resolution"
+      : "maintain-framerate";
+  } else {
+    encoding.maxBitrate = 4_500_000;
+    encoding.maxFramerate = 30;
+    encoding.scaleResolutionDownBy = 1;
+    encoding.priority = "medium";
+    encoding.networkPriority = "medium";
+    parameters.degradationPreference = "maintain-framerate";
+  }
+  try {
+    await sender.setParameters(parameters);
+  } catch {}
+}
+
+async function configureAllSenders(pc) {
+  await Promise.all(
+    pc.getSenders().map((sender) =>
+      configureSender(sender, sender._mielcordSource).catch(() => {})
+    )
+  );
+}
+
+async function syncLocalTracks(pc) {
+  let topologyChanged = false;
+  for (const descriptor of localTrackDescriptors()) {
+    let sender = pc.getSenders().find(
+      (candidate) => candidate._mielcordSource === descriptor.source
+    );
+    if (sender) {
+      if (sender.track !== descriptor.track) {
+        await sender.replaceTrack(descriptor.track);
+      }
+    } else {
+      sender = pc.addTrack(descriptor.track, descriptor.stream);
+      sender._mielcordSource = descriptor.source;
+      topologyChanged = true;
+    }
+    sender._mielcordSource = descriptor.source;
+    await configureSender(sender, descriptor.source);
+  }
+  return topologyChanged;
+}
+
+function localSourceMap(pc) {
+  const sources = {};
+  for (const transceiver of pc.getTransceivers()) {
+    const source = transceiver.sender?._mielcordSource;
+    if (transceiver.mid && source) sources[transceiver.mid] = source;
+  }
+  return sources;
+}
+
+function sendRtcDescription(userId, pc) {
+  if (!pc.localDescription) return;
   wsSend("rtc:signal", {
     channel_id: state.voice.channelId,
     target_user_id: userId,
-    signal: { description: pc.localDescription }
+    signal: {
+      description: pc.localDescription,
+      sources: localSourceMap(pc)
+    }
   });
 }
 
+async function createPeer(userId, initiator = false) {
+  const key = Number(userId);
+  if (state.voice.pcs.has(key)) return state.voice.pcs.get(key);
+  const pc = new RTCPeerConnection(rtcConfig);
+  pc._mielcord = {
+    polite: Number(state.user?.id || 0) > key,
+    makingOffer: false,
+    ignoreOffer: false,
+    isSettingRemoteAnswerPending: false,
+    needsNegotiation: false,
+    pendingIceRestart: false,
+    pendingCandidates: [],
+    remoteSources: {},
+    signalChain: Promise.resolve(),
+    restartTimer: null,
+    negotiationTimer: null,
+    lastIceRestartAt: 0
+  };
+  state.voice.pcs.set(key, pc);
+  const peer = state.voice.peers.get(key);
+  if (peer) ensurePeerMedia(peer);
+
+  pc.addEventListener("icecandidate", (event) => {
+    if (!event.candidate) return;
+    wsSend("rtc:signal", {
+      channel_id: state.voice.channelId,
+      target_user_id: key,
+      signal: {
+        candidate: event.candidate.toJSON ? event.candidate.toJSON() : event.candidate
+      }
+    });
+  });
+
+  pc.addEventListener("track", (event) => {
+    const currentPeer = state.voice.peers.get(key);
+    if (!currentPeer) return;
+    ensurePeerMedia(currentPeer);
+    const streamId = event.streams?.[0]?.id || "";
+    const negotiatedSource = pc._mielcord.remoteSources[event.transceiver?.mid] || "";
+    const source = classifyRemoteTrack(currentPeer, event.track, streamId, negotiatedSource);
+    currentPeer.trackMeta.set(event.track.id, {
+      track: event.track,
+      streamId,
+      source
+    });
+    moveRemoteTrack(currentPeer, event.track, source);
+
+    const refresh = () => {
+      reconcilePeerMedia(currentPeer);
+      syncMediaElements();
+    };
+    event.track.addEventListener("unmute", refresh);
+    event.track.addEventListener("mute", refresh);
+    event.track.addEventListener("ended", () => {
+      const endedSource = currentPeer.trackMeta.get(event.track.id)?.source;
+      removeTrackFromPeerStreams(currentPeer, event.track);
+      currentPeer.trackMeta.delete(event.track.id);
+      if (endedSource === "audio") stopSpeakingMonitor(key);
+      syncMediaElements();
+    });
+    if (event.track.kind === "audio" && source === "audio") {
+      startSpeakingMonitor(key, currentPeer.streams.audio);
+    }
+    refresh();
+  });
+
+  pc.addEventListener("negotiationneeded", () => {
+    negotiate(key).catch(() => {});
+  });
+
+  pc.addEventListener("iceconnectionstatechange", () => {
+    if (pc.iceConnectionState === "failed") restartPeerIce(key, pc, 0);
+    if (pc.iceConnectionState === "disconnected") restartPeerIce(key, pc, 3000);
+  });
+
+  pc.addEventListener("connectionstatechange", () => {
+    if (pc.connectionState === "connected") {
+      markPeerMediaHealthy(key);
+      configureAllSenders(pc).catch(() => {});
+    }
+    if (pc.connectionState === "failed") restartPeerIce(key, pc, 0);
+    if (pc.connectionState === "disconnected") restartPeerIce(key, pc, 3000);
+  });
+
+  await syncLocalTracks(pc);
+  if (initiator) await negotiate(key);
+  return pc;
+}
+
+async function negotiate(userId, iceRestart = false) {
+  const key = Number(userId);
+  const pc = state.voice.pcs.get(key) || await createPeer(key, false);
+  const meta = pc._mielcord;
+  if (!meta || pc.signalingState === "closed") return;
+  if (iceRestart) meta.pendingIceRestart = true;
+  if (meta.makingOffer || pc.signalingState !== "stable") {
+    meta.needsNegotiation = true;
+    return;
+  }
+  try {
+    meta.makingOffer = true;
+    await syncLocalTracks(pc);
+    if (meta.pendingIceRestart) {
+      meta.pendingIceRestart = false;
+      try { pc.restartIce(); } catch {}
+    }
+    await pc.setLocalDescription();
+    await configureAllSenders(pc);
+    sendRtcDescription(key, pc);
+    meta.needsNegotiation = false;
+  } finally {
+    meta.makingOffer = false;
+  }
+}
+
+async function flushPendingCandidates(pc) {
+  const meta = pc._mielcord;
+  if (!meta || !pc.remoteDescription) return;
+  const candidates = meta.pendingCandidates.splice(0);
+  for (const candidate of candidates) {
+    try {
+      await pc.addIceCandidate(candidate);
+    } catch (error) {
+      if (!meta.ignoreOffer) throw error;
+    }
+  }
+}
+
+async function processRtcSignal(userId, signal) {
+  const key = Number(userId);
+  const pc = state.voice.pcs.get(key) || await createPeer(key, false);
+  const meta = pc._mielcord;
+  if (!meta || pc.signalingState === "closed") return;
+
+  if (signal.description) {
+    if (signal.sources && typeof signal.sources === "object") {
+      meta.remoteSources = { ...meta.remoteSources, ...signal.sources };
+    }
+    const description = signal.description;
+    const readyForOffer = !meta.makingOffer &&
+      (pc.signalingState === "stable" || meta.isSettingRemoteAnswerPending);
+    const offerCollision = description.type === "offer" && !readyForOffer;
+    meta.ignoreOffer = !meta.polite && offerCollision;
+    if (meta.ignoreOffer) return;
+
+    meta.isSettingRemoteAnswerPending = description.type === "answer";
+    try {
+      await pc.setRemoteDescription(description);
+    } finally {
+      meta.isSettingRemoteAnswerPending = false;
+    }
+    await flushPendingCandidates(pc);
+
+    if (description.type === "offer") {
+      await syncLocalTracks(pc);
+      await pc.setLocalDescription();
+      await configureAllSenders(pc);
+      sendRtcDescription(key, pc);
+    } else {
+      await configureAllSenders(pc);
+    }
+    const peer = state.voice.peers.get(key);
+    if (peer) {
+      reconcilePeerMedia(peer);
+      syncMediaElements();
+    }
+    if (meta.needsNegotiation && pc.signalingState === "stable") {
+      clearTimeout(meta.negotiationTimer);
+      meta.negotiationTimer = setTimeout(() => negotiate(key).catch(() => {}), 0);
+    }
+    return;
+  }
+
+  if (signal.candidate) {
+    if (meta.ignoreOffer) return;
+    if (!pc.remoteDescription) {
+      meta.pendingCandidates.push(signal.candidate);
+    } else {
+      await pc.addIceCandidate(signal.candidate);
+    }
+  }
+}
+
 async function handleRtcSignal(payload) {
-  const userId = payload.from_user_id;
+  const userId = Number(payload.from_user_id);
   const signal = payload.signal || {};
   let pc = state.voice.pcs.get(userId);
   if (!pc) pc = await createPeer(userId, false);
-
-  if (signal.description) {
-    await pc.setRemoteDescription(signal.description);
-    if (signal.description.type === "offer") {
-      addLocalTracks(pc);
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      wsSend("rtc:signal", {
-        channel_id: state.voice.channelId,
-        target_user_id: userId,
-        signal: { description: pc.localDescription }
-      });
-    }
-  }
-  if (signal.candidate) {
-    await pc.addIceCandidate(signal.candidate).catch(() => {});
-  }
+  const meta = pc._mielcord;
+  meta.signalChain = meta.signalChain
+    .catch(() => {})
+    .then(() => processRtcSignal(userId, signal));
+  return meta.signalChain;
 }
 
 function toggleMute() {
@@ -2992,13 +3604,60 @@ function toggleDeafen() {
   render();
 }
 
+async function syncLocalMediaToPeer(userId, pc) {
+  const topologyChanged = await syncLocalTracks(pc);
+  if (topologyChanged) await negotiate(userId);
+}
+
+async function syncLocalMediaToAllPeers() {
+  await Promise.all(
+    [...state.voice.pcs.entries()].map(([userId, pc]) =>
+      syncLocalMediaToPeer(userId, pc).catch(() => {})
+    )
+  );
+}
+
+async function replaceLocalSourceOnPeer(pc, descriptors, sourceNames) {
+  let topologyChanged = false;
+  for (const source of sourceNames) {
+    const descriptor = descriptors.find((item) => item.source === source) || null;
+    let sender = pc.getSenders().find((candidate) => candidate._mielcordSource === source);
+    if (sender) {
+      if (sender.track !== descriptor?.track) {
+        await sender.replaceTrack(descriptor?.track || null);
+      }
+    } else if (descriptor) {
+      sender = pc.addTrack(descriptor.track, descriptor.stream);
+      sender._mielcordSource = source;
+      topologyChanged = true;
+    }
+    if (sender && descriptor) {
+      sender._mielcordSource = source;
+      await configureSender(sender, source);
+    }
+  }
+  return topologyChanged;
+}
+
+async function replaceLocalSourcesEverywhere(sourceNames) {
+  const descriptors = localTrackDescriptors();
+  await Promise.all(
+    [...state.voice.pcs.entries()].map(async ([userId, pc]) => {
+      const topologyChanged = await replaceLocalSourceOnPeer(pc, descriptors, sourceNames);
+      if (topologyChanged) await negotiate(userId);
+    })
+  );
+}
+
 async function toggleCamera() {
   if (!state.voice.channelId || state.voice.ghost) return;
   if (state.voice.cameraStream) {
-    removeLocalSource("camera");
-    state.voice.cameraStream.getTracks().forEach((track) => track.stop());
+    const oldStream = state.voice.cameraStream;
     state.voice.cameraStream = null;
     state.voice.camera = false;
+    publishVoiceState();
+    await replaceLocalSourcesEverywhere(["camera"]);
+    oldStream.getTracks().forEach((track) => track.stop());
   } else {
     const stream = await requireMedia("Camera").getUserMedia({
       audio: false,
@@ -3010,96 +3669,120 @@ async function toggleCamera() {
     });
     stream.getVideoTracks().forEach((track) => {
       track._mielcordSource = "camera";
+      try { track.contentHint = "motion"; } catch {}
     });
     state.voice.cameraStream = stream;
     state.voice.camera = true;
-    for (const pc of state.voice.pcs.values()) addLocalTracks(pc);
+    publishVoiceState();
+    await replaceLocalSourcesEverywhere(["camera"]);
   }
-  await renegotiateAll();
-  wsSend("voice:state", {
-    muted: state.voice.muted,
-    camera: state.voice.camera,
-    screen: state.voice.screen
+  render();
+}
+
+async function captureScreenStream() {
+  const devices = mediaDevices();
+  if (!devices?.getDisplayMedia) {
+    throw new Error("Screen sharing is not available in this browser.");
+  }
+  const stream = await devices.getDisplayMedia({
+    video: streamConstraints(),
+    audio: true,
+    selfBrowserSurface: "exclude",
+    surfaceSwitching: "include",
+    systemAudio: "include"
   });
+  const videoTrack = stream.getVideoTracks()[0];
+  if (!videoTrack) {
+    stream.getTracks().forEach((track) => track.stop());
+    throw new Error("No video track was returned for this screen share.");
+  }
+  try {
+    await videoTrack.applyConstraints(streamConstraints());
+  } catch {}
+  stream.getTracks().forEach((track) => {
+    track._mielcordSource = track.kind === "video" ? "screen" : "screen-audio";
+    try {
+      track.contentHint = track.kind === "video" ? screenTrackHint(track) : "music";
+    } catch {}
+  });
+  videoTrack.addEventListener("ended", () => {
+    if (state.voice.screenStream !== stream) return;
+    stopScreenShare().catch(() => {});
+  });
+  return stream;
+}
+
+async function installScreenStream(stream) {
+  const oldStream = state.voice.screenStream;
+  state.voice.screenStream = stream;
+  state.voice.screen = true;
+  publishVoiceState();
+  await replaceLocalSourcesEverywhere(["screen", "screen-audio"]);
+  oldStream?.getTracks().forEach((track) => track.stop());
+  if (!oldStream) playTone("stream");
   render();
 }
 
 async function startScreenShare() {
-  const devices = mediaDevices();
-  if (!devices?.getDisplayMedia) throw new Error("Screen sharing is not available in this browser.");
-  const stream = await devices.getDisplayMedia({
-    video: streamConstraints(),
-    audio: true
-  });
-  stream.getTracks().forEach((track) => {
-    track._mielcordSource = track.kind === "video" ? "screen" : "screen-audio";
-    track.addEventListener("ended", () => {
-      if (track._mielcordSource === "screen") {
-        stopScreenShare(false);
-        wsSend("voice:state", {
-          muted: state.voice.muted,
-          camera: state.voice.camera,
-          screen: false
-        });
-        render();
-      }
-    });
-  });
-  state.voice.screenStream = stream;
-  state.voice.screen = true;
-  playTone("stream");
-  for (const pc of state.voice.pcs.values()) addLocalTracks(pc);
-  await renegotiateAll();
+  const stream = await captureScreenStream();
+  await installScreenStream(stream);
 }
 
-function stopScreenShare(renegotiate = true) {
-  removeLocalSource("screen");
-  state.voice.screenStream?.getTracks().forEach((track) => track.stop());
+async function stopScreenShare() {
+  const oldStream = state.voice.screenStream;
+  if (!oldStream && !state.voice.screen) return;
   state.voice.screenStream = null;
-  if (state.voice.screen) playTone("stopStream");
   state.voice.screen = false;
-  if (renegotiate) renegotiateAll().catch(() => {});
+  state.voice.videoFrameTimes.delete("screen-local");
+  if (state.focusedVideoId === "screen-local") state.focusedVideoId = null;
+  if (state.fullscreenVideoId === "screen-local") {
+    state.fullscreenVideoId = null;
+    if (documentFullscreenElement()) exitDocumentFullscreen().catch(() => {});
+  }
+  publishVoiceState();
+  await replaceLocalSourcesEverywhere(["screen", "screen-audio"]);
+  oldStream?.getTracks().forEach((track) => track.stop());
+  playTone("stopStream");
+  render();
 }
 
 async function toggleScreen() {
   if (!state.voice.channelId || state.voice.ghost) return;
   if (state.voice.screenStream) {
-    stopScreenShare();
+    await stopScreenShare();
   } else {
     await startScreenShare();
   }
-  wsSend("voice:state", {
-    muted: state.voice.muted,
-    camera: state.voice.camera,
-    screen: state.voice.screen
-  });
-  render();
 }
 
 async function changeScreenShare() {
   if (!state.voice.channelId || state.voice.ghost) return;
-  if (state.voice.screenStream) stopScreenShare(false);
-  await startScreenShare();
-  wsSend("voice:state", {
-    muted: state.voice.muted,
-    camera: state.voice.camera,
-    screen: state.voice.screen
-  });
-  render();
+  const stream = await captureScreenStream();
+  await installScreenStream(stream);
 }
 
-function removeLocalSource(source) {
-  for (const pc of state.voice.pcs.values()) {
-    for (const sender of pc.getSenders()) {
-      if (sender.track?._mielcordSource === source || (source === "screen" && sender.track?._mielcordSource === "screen-audio")) {
-        pc.removeTrack(sender);
-      }
+async function applyActiveStreamQuality() {
+  const track = state.voice.screenStream?.getVideoTracks()[0] || null;
+  if (track) {
+    try {
+      await track.applyConstraints(streamConstraints());
+    } catch (error) {
+      notice("The browser kept the closest supported stream resolution: " + (error.message || error));
     }
   }
+  await Promise.all(
+    [...state.voice.pcs.values()].map(async (pc) => {
+      const sender = pc.getSenders().find((item) => item._mielcordSource === "screen");
+      if (sender) await configureSender(sender, "screen");
+    })
+  );
+  if (state.voice.screen) publishVoiceState();
 }
 
 async function renegotiateAll() {
-  await Promise.all([...state.voice.pcs.keys()].map((userId) => negotiate(userId).catch(() => {})));
+  await Promise.all(
+    [...state.voice.pcs.keys()].map((userId) => negotiate(userId).catch(() => {}))
+  );
 }
 
 function leaveVoice(notify = true) {
@@ -3109,6 +3792,7 @@ function leaveVoice(notify = true) {
   state.voice.pcs.forEach((pc) => pc.close());
   state.voice.pcs.clear();
   state.voice.peers.clear();
+  stopMediaHealthMonitor();
   stopAllSpeakingMonitors();
   state.voice.localAudio?.getTracks().forEach((track) => track.stop());
   state.voice.cameraStream?.getTracks().forEach((track) => track.stop());
@@ -3146,13 +3830,15 @@ function remoteAudioLayer() {
   return layer;
 }
 
-function ensureRemoteAudioElement(userId) {
+function ensureRemoteAudioElement(userId, source = "voice") {
   const layer = remoteAudioLayer();
-  let audio = document.getElementById(`audio-peer-${userId}`);
+  const streamAudio = source === "screen";
+  const id = streamAudio ? `audio-screen-peer-${userId}` : `audio-peer-${userId}`;
+  let audio = document.getElementById(id);
   if (!audio) {
     audio = document.createElement("audio");
-    audio.id = `audio-peer-${userId}`;
-    audio.dataset.peerAudio = String(userId);
+    audio.id = id;
+    audio.dataset.peerAudio = `${userId}:${source}`;
     audio.autoplay = true;
     audio.playsInline = true;
     layer.appendChild(audio);
@@ -3163,13 +3849,21 @@ function ensureRemoteAudioElement(userId) {
 function syncRemoteAudioElements() {
   const active = new Set();
   for (const [userId, peer] of state.voice.peers) {
-    active.add(String(userId));
-    if (!peer.stream) continue;
-    const audio = ensureRemoteAudioElement(userId);
-    if (audio.srcObject !== peer.stream) audio.srcObject = peer.stream;
-    applyPeerMediaSettings(userId);
-    const play = audio.play();
-    if (play?.catch) play.catch(() => {});
+    ensurePeerMedia(peer);
+    const sources = [
+      { name: "voice", stream: peer.streams.audio },
+      { name: "screen", stream: peer.streams.screenAudio }
+    ];
+    for (const source of sources) {
+      if (!liveTracks(source.stream, "audio").length) continue;
+      const key = `${userId}:${source.name}`;
+      active.add(key);
+      const audio = ensureRemoteAudioElement(userId, source.name);
+      if (audio.srcObject !== source.stream) audio.srcObject = source.stream;
+      applyPeerMediaSettings(userId);
+      const play = audio.play();
+      if (play?.catch) play.catch(() => {});
+    }
   }
   const layer = document.getElementById("remoteAudioLayer");
   layer?.querySelectorAll("[data-peer-audio]").forEach((node) => {
@@ -3181,26 +3875,257 @@ function cleanupRemoteAudioElements() {
   document.getElementById("remoteAudioLayer")?.remove();
 }
 
-function syncMediaElements() {
-  if (state.voice.localAudio) startSpeakingMonitor(state.user?.id, state.voice.localAudio, () => state.voice.muted);
-  const local = document.getElementById("video-local");
-  if (local) {
-    const stream = new MediaStream();
-    for (const source of [state.voice.cameraStream, state.voice.screenStream]) {
-      source?.getVideoTracks().forEach((track) => stream.addTrack(track));
-    }
-    const hasLocalVideo = stream.getVideoTracks().length > 0;
-    local.srcObject = stream.getTracks().length ? stream : null;
-    local.classList.toggle("has-video", hasLocalVideo);
+function videoMediaForId(videoId) {
+  if (videoId === "local") {
+    return {
+      stream: state.voice.cameraStream,
+      expected: !!state.voice.camera,
+      source: "camera",
+      userId: Number(state.user?.id || 0)
+    };
   }
-  for (const [userId, peer] of state.voice.peers) {
-    const video = document.getElementById(`video-peer-${userId}`);
-    if (video && peer.stream) {
-      video.srcObject = peer.stream;
-      video.classList.toggle("has-video", peer.stream.getVideoTracks().length > 0);
-      if (peer.stream.getAudioTracks().length) startSpeakingMonitor(userId, peer.stream);
-      applyPeerMediaSettings(userId);
+  if (videoId === "screen-local") {
+    return {
+      stream: state.voice.screenStream,
+      expected: !!state.voice.screen,
+      source: "screen",
+      userId: Number(state.user?.id || 0)
+    };
+  }
+  if (videoId.startsWith("screen-peer-")) {
+    const userId = Number(videoId.slice("screen-peer-".length));
+    const peer = state.voice.peers.get(userId);
+    ensurePeerMedia(peer || {});
+    return {
+      stream: peer?.streams?.screen || null,
+      expected: !!peer?.state?.screen,
+      source: "screen",
+      userId
+    };
+  }
+  if (videoId.startsWith("peer-")) {
+    const userId = Number(videoId.slice("peer-".length));
+    const peer = state.voice.peers.get(userId);
+    ensurePeerMedia(peer || {});
+    return {
+      stream: peer?.streams?.camera || null,
+      expected: !!peer?.state?.camera,
+      source: "camera",
+      userId
+    };
+  }
+  return { stream: null, expected: false, source: "", userId: 0 };
+}
+
+function setVideoStatus(videoId, kind = "", message = "") {
+  const tile = document.querySelector('[data-video-id="' + videoId + '"]');
+  if (!tile) return;
+  tile.classList.toggle("media-waiting", kind === "waiting");
+  tile.classList.toggle("media-recovering", kind === "recovering");
+  const status = tile.querySelector("[data-media-status]");
+  if (status) status.textContent = message;
+}
+
+function noteVideoFrame(videoId, video) {
+  state.voice.videoFrameTimes.set(videoId, performance.now());
+  video.classList.add("has-video");
+  setVideoStatus(videoId, "", "");
+}
+
+function monitorVideoFrames(video, videoId, track) {
+  const monitorKey = track?.id || "";
+  if (!track || video._mielcordFrameTrackId === monitorKey) return;
+  video._mielcordFrameTrackId = monitorKey;
+
+  const note = () => {
+    if (!video.isConnected || video._mielcordFrameTrackId !== monitorKey) return false;
+    noteVideoFrame(videoId, video);
+    return true;
+  };
+  video.addEventListener("loadeddata", note, { once: true });
+  video.addEventListener("playing", note, { once: true });
+  video.addEventListener("timeupdate", note);
+
+  if (typeof video.requestVideoFrameCallback === "function") {
+    const onFrame = () => {
+      if (!note()) return;
+      video.requestVideoFrameCallback(onFrame);
+    };
+    video.requestVideoFrameCallback(onFrame);
+  }
+}
+
+function attachVideoMedia(videoId) {
+  const video = document.getElementById("video-" + videoId);
+  if (!video) return;
+  const media = videoMediaForId(videoId);
+  const stream = media.stream;
+  const track = liveTracks(stream, "video")[0] || null;
+
+  video.muted = true;
+  video.defaultMuted = true;
+  video.volume = 0;
+  video.playsInline = true;
+
+  if (!track) {
+    if (video.srcObject) video.srcObject = null;
+    video.classList.remove("has-video");
+    state.voice.videoFrameTimes.delete(videoId);
+    setVideoStatus(
+      videoId,
+      media.expected ? "waiting" : "",
+      media.expected ? (media.source === "screen" ? "Connecting stream..." : "Connecting camera...") : ""
+    );
+    return;
+  }
+
+  if (video.srcObject !== stream) video.srcObject = stream;
+  monitorVideoFrames(video, videoId, track);
+  const play = video.play();
+  if (play?.catch) play.catch(() => {});
+  const hasDecodedFrame = video.videoWidth > 0 && video.readyState >= 2 && !track.muted;
+  video.classList.toggle("has-video", hasDecodedFrame);
+  if (hasDecodedFrame) {
+    noteVideoFrame(videoId, video);
+  } else if (media.expected) {
+    setVideoStatus(
+      videoId,
+      "waiting",
+      media.source === "screen" ? "Starting stream..." : "Starting camera..."
+    );
+  }
+}
+
+function videoIdsForPeer(userId, peer) {
+  const ids = [];
+  if (peer?.state?.camera) ids.push("peer-" + userId);
+  if (peer?.state?.screen) ids.push("screen-peer-" + userId);
+  return ids;
+}
+
+function markPeerMediaHealthy(userId) {
+  const peer = state.voice.peers.get(Number(userId));
+  if (!peer) return;
+  ensurePeerMedia(peer);
+  peer.health.lastHealthyAt = performance.now();
+  peer.health.recoveryAttempts = 0;
+  for (const videoId of videoIdsForPeer(userId, peer)) {
+    setVideoStatus(videoId, "", "");
+  }
+}
+
+async function recoverPeerMedia(userId, pc, peer, stalledVideoIds, statsProgressed) {
+  const now = performance.now();
+  if (now - peer.health.lastRecoveryAt < 8000) return;
+  peer.health.lastRecoveryAt = now;
+  peer.health.recoveryAttempts += 1;
+
+  for (const videoId of stalledVideoIds) {
+    const video = document.getElementById("video-" + videoId);
+    if (video) {
+      video.muted = true;
+      const play = video.play();
+      if (play?.catch) play.catch(() => {});
     }
+    setVideoStatus(videoId, "recovering", "Recovering video...");
+  }
+
+  for (const receiver of pc.getReceivers()) {
+    if (receiver.track?.kind !== "video") continue;
+    try {
+      const request = receiver.requestKeyFrame?.();
+      if (request?.catch) request.catch(() => {});
+    } catch {}
+  }
+
+  const connectionBroken = ["failed", "disconnected"].includes(pc.connectionState) ||
+    ["failed", "disconnected"].includes(pc.iceConnectionState);
+  if (connectionBroken || !statsProgressed || peer.health.recoveryAttempts % 3 === 0) {
+    restartPeerIce(userId, pc, 0);
+  } else {
+    await negotiate(userId).catch(() => {});
+  }
+}
+
+async function checkMediaHealth() {
+  if (!state.voice.channelId || document.visibilityState !== "visible") return;
+  const now = performance.now();
+  for (const [userId, peer] of state.voice.peers) {
+    const pc = state.voice.pcs.get(userId);
+    if (!pc || pc.signalingState === "closed") continue;
+    ensurePeerMedia(peer);
+
+    let frames = 0;
+    let bytes = 0;
+    try {
+      const stats = await pc.getStats();
+      stats.forEach((report) => {
+        const kind = report.kind || report.mediaType;
+        if (report.type === "inbound-rtp" && kind === "video" && !report.isRemote) {
+          frames += Number(report.framesDecoded || report.framesReceived || 0);
+          bytes += Number(report.bytesReceived || 0);
+        }
+      });
+    } catch {}
+
+    const statsProgressed =
+      frames > peer.health.previousFrames || bytes > peer.health.previousBytes;
+    peer.health.previousFrames = Math.max(peer.health.previousFrames, frames);
+    peer.health.previousBytes = Math.max(peer.health.previousBytes, bytes);
+
+    const stalled = [];
+    for (const source of ["camera", "screen"]) {
+      if (!peer.state?.[source]) continue;
+      const videoId = source === "screen" ? "screen-peer-" + userId : "peer-" + userId;
+      const video = document.getElementById("video-" + videoId);
+      const lastFrame = state.voice.videoFrameTimes.get(videoId) || 0;
+      const visuallyHealthy = !!video &&
+        video.videoWidth > 0 &&
+        video.readyState >= 2 &&
+        !video.paused &&
+        (typeof video.requestVideoFrameCallback !== "function" || now - lastFrame < 6000);
+      if (visuallyHealthy) {
+        setVideoStatus(videoId, "", "");
+        peer.health.expectedSince[source] = now;
+      } else if (now - peer.health.expectedSince[source] > 7000) {
+        stalled.push(videoId);
+      }
+    }
+
+    if (!stalled.length) {
+      if (videoIdsForPeer(userId, peer).length) markPeerMediaHealthy(userId);
+      continue;
+    }
+    await recoverPeerMedia(userId, pc, peer, stalled, statsProgressed);
+  }
+}
+
+function startMediaHealthMonitor() {
+  stopMediaHealthMonitor(false);
+  state.voice.healthTimer = setInterval(() => {
+    checkMediaHealth().catch(() => {});
+  }, 3000);
+}
+
+function stopMediaHealthMonitor(clearFrames = true) {
+  if (state.voice.healthTimer) clearInterval(state.voice.healthTimer);
+  state.voice.healthTimer = null;
+  if (clearFrames) state.voice.videoFrameTimes.clear();
+}
+
+function syncMediaElements() {
+  if (state.voice.localAudio) {
+    startSpeakingMonitor(state.user?.id, state.voice.localAudio, () => state.voice.muted);
+  }
+  document.querySelectorAll(".video-tile[data-video-id]").forEach((tile) => {
+    attachVideoMedia(tile.dataset.videoId || "");
+  });
+  for (const [userId, peer] of state.voice.peers) {
+    ensurePeerMedia(peer);
+    if (liveTracks(peer.streams.audio, "audio").length) {
+      startSpeakingMonitor(userId, peer.streams.audio);
+    }
+    applyPeerMediaSettings(userId);
   }
   syncRemoteAudioElements();
   renderSpeakingHighlights();
