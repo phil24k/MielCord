@@ -97,6 +97,9 @@ DEFAULT_CONFIG = {
     "allowed_country_codes": ["CA"],
     "country_restriction_allow_private": True,
     "country_headers": ["CF-IPCountry", "X-Country-Code", "X-AppEngine-Country", "X-Vercel-IP-Country"],
+    "rtc_ice_servers": [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+    ],
     "rate_limits": {
         "register_per_ip": {"limit": 5, "window_seconds": 600},
         "login_per_ip": {"limit": 30, "window_seconds": 300},
@@ -198,6 +201,34 @@ class AppConfig:
         headers = [value.strip() for value in raw if value.strip()]
         return headers or list(DEFAULT_CONFIG["country_headers"])
 
+    def rtc_ice_servers(self) -> list[dict[str, Any]]:
+        values = self.get("rtc_ice_servers", DEFAULT_CONFIG["rtc_ice_servers"])
+        if not isinstance(values, list):
+            values = DEFAULT_CONFIG["rtc_ice_servers"]
+        servers: list[dict[str, Any]] = []
+        for value in values[:8]:
+            if not isinstance(value, dict):
+                continue
+            raw_urls = value.get("urls", [])
+            if isinstance(raw_urls, str):
+                raw_urls = [raw_urls]
+            if not isinstance(raw_urls, list):
+                continue
+            urls = [
+                str(url).strip()
+                for url in raw_urls[:8]
+                if re.match(r"^(stun|stuns|turn|turns):", str(url).strip(), re.IGNORECASE)
+            ]
+            if not urls:
+                continue
+            server: dict[str, Any] = {"urls": urls}
+            if value.get("username") is not None:
+                server["username"] = str(value.get("username") or "")[:256]
+            if value.get("credential") is not None:
+                server["credential"] = str(value.get("credential") or "")[:512]
+            servers.append(server)
+        return servers or json.loads(json.dumps(DEFAULT_CONFIG["rtc_ice_servers"]))
+
     def rate_limit(self, name: str) -> tuple[int, int]:
         limits = self.get("rate_limits", {})
         item = limits.get(name, {}) if isinstance(limits, dict) else {}
@@ -233,6 +264,14 @@ class APIError(Exception):
 
 def now() -> int:
     return int(time.time())
+
+
+def bounded_int(value: Any, minimum: int, maximum: int, fallback: int = 0) -> int:
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return fallback
+    return max(minimum, min(maximum, parsed))
 
 
 def clean_email(value: Any) -> str:
@@ -1464,6 +1503,22 @@ class Database:
         return text if re.match(r"^#[0-9a-fA-F]{6}$", text) else "#d99a23"
 
 
+def empty_media_state(ghost: bool = False) -> dict[str, Any]:
+    return {
+        "muted": bool(ghost),
+        "camera": False,
+        "screen": False,
+        "speaking": False,
+        "camera_stream_id": "",
+        "screen_stream_id": "",
+        "screen_width": 0,
+        "screen_height": 0,
+        "screen_frame_rate": 0,
+        "stream_quality": "",
+        **({"ghost": True} if ghost else {}),
+    }
+
+
 @dataclass(eq=False)
 class WSClient:
     handler: "MielcordHandler"
@@ -1473,7 +1528,7 @@ class WSClient:
     send_lock: threading.Lock = field(default_factory=threading.Lock)
     voice_channel_id: int | None = None
     voice_guild_id: int | None = None
-    media_state: dict[str, Any] = field(default_factory=lambda: {"muted": False, "camera": False, "screen": False, "speaking": False})
+    media_state: dict[str, Any] = field(default_factory=empty_media_state)
     ghost: bool = False
     mobile: bool = False
     overlay_subscribed: bool = False
@@ -1718,11 +1773,19 @@ class Hub:
             if client.ghost:
                 return
             previous = dict(client.media_state)
+            camera = bool(payload.get("camera"))
+            screen = bool(payload.get("screen"))
             client.media_state.update({
                 "muted": bool(payload.get("muted")),
-                "camera": bool(payload.get("camera")),
-                "screen": bool(payload.get("screen")),
+                "camera": camera,
+                "screen": screen,
                 "speaking": bool(client.media_state.get("speaking")),
+                "camera_stream_id": str(payload.get("camera_stream_id") or "")[:160] if camera else "",
+                "screen_stream_id": str(payload.get("screen_stream_id") or "")[:160] if screen else "",
+                "screen_width": bounded_int(payload.get("screen_width"), 0, 16384) if screen else 0,
+                "screen_height": bounded_int(payload.get("screen_height"), 0, 16384) if screen else 0,
+                "screen_frame_rate": bounded_int(payload.get("screen_frame_rate"), 0, 240) if screen else 0,
+                "stream_quality": str(payload.get("stream_quality") or "")[:24] if screen else "",
             })
             changed = {key: client.media_state.get(key) for key in client.media_state if previous.get(key) != client.media_state.get(key)}
             if client.voice_channel_id and client.voice_guild_id:
@@ -1786,7 +1849,7 @@ class Hub:
             client.voice_channel_id = channel_id
             client.voice_guild_id = guild_id
             client.ghost = ghost
-            client.media_state = {"muted": True, "camera": False, "screen": False, "speaking": False, "ghost": True} if ghost else {"muted": False, "camera": False, "screen": False, "speaking": False}
+            client.media_state = empty_media_state(ghost)
         if ghost and was_visible and not self._is_user_visible_online(client.user_id):
             self.broadcast_presence(client.user_id, "offline", client.guild_ids)
         if not ghost and not was_visible:
@@ -1830,7 +1893,7 @@ class Hub:
                     self.voice_rooms.pop(channel_id, None)
             client.voice_channel_id = None
             client.voice_guild_id = None
-            client.media_state = {"muted": False, "camera": False, "screen": False, "speaking": False}
+            client.media_state = empty_media_state()
             client.ghost = False if restore_visibility else client.ghost
         if guild_id and was_ghost:
             for peer in peers:
@@ -1886,11 +1949,22 @@ class Hub:
         target_user_id = int(payload.get("target_user_id") or 0)
         channel_id = int(payload.get("channel_id") or client.voice_channel_id or 0)
         signal_payload = payload.get("signal")
-        if not target_user_id or not channel_id or signal_payload is None:
+        if (
+            not target_user_id
+            or not channel_id
+            or signal_payload is None
+            or client.voice_channel_id != channel_id
+        ):
             return
         with self.lock:
             room = self.voice_rooms.get(channel_id, set())
-            targets = [peer for peer in room if peer.user_id == target_user_id]
+            if client not in room:
+                return
+            targets = [
+                peer
+                for peer in room
+                if peer is not client and peer.user_id == target_user_id
+            ]
         for target in targets:
             target.send(
                 "rtc:signal",
@@ -2080,6 +2154,7 @@ class MielcordHandler(BaseHTTPRequestHandler):
                 "private_mode_enabled": self.app.config.private_mode_enabled(),
                 "country_restriction_enabled": self.app.config.country_restriction_enabled(),
                 "allowed_country_codes": sorted(self.app.config.allowed_country_codes()),
+                "rtc_ice_servers": self.app.config.rtc_ice_servers(),
             }, None
 
         if segments == ["api", "register"] and method == "POST":
