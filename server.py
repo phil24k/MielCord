@@ -278,7 +278,7 @@ def clean_email(value: Any) -> str:
     return str(value or "").strip().lower()[:254]
 
 
-def gravatar_url(email_lc: str | None, size: int = 128) -> str:
+def gravatar_url(email_lc: str | None, size: int = 512) -> str:
     email_lc = str(email_lc or "").strip().lower()
     if not email_lc:
         return ""
