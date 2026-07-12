@@ -1209,8 +1209,9 @@ function renderCollapsedCallControls() {
 function renderCallWindow() {
   const peers = [...state.voice.peers.values()];
   const total = peers.length + (state.voice.ghost ? 0 : 1);
+  const hasScreenShare = state.voice.screen || peers.some((peer) => peer.state?.screen);
   return `
-    <section class="call-window ${state.callCollapsed ? "collapsed" : ""}">
+    <section class="call-window ${state.callCollapsed ? "collapsed" : ""} ${state.voice.screen ? "has-local-screen" : ""} ${hasScreenShare ? "has-screen-share" : ""}">
       <header class="call-window-header">
         <div class="call-title">
           <strong>${escapeHtml(state.voice.channelName || "Voice")}</strong>
@@ -1258,15 +1259,37 @@ function renderSearchResults() {
 function videoGridLayout(count) {
   const total = Math.max(1, Number(count) || 1);
   const pane = document.querySelector(".chat-pane") || document.documentElement;
-  const paneWidth = pane.clientWidth || window.innerWidth;
-  const paneHeight = pane.clientHeight || window.innerHeight;
-  const reserved = 170;
-  const stageWidth = Math.max(1, paneWidth - 32);
-  const stageHeight = Math.max(1, paneHeight - reserved);
-  const ratio = Math.max(0.5, Math.min(3.4, stageWidth / stageHeight));
-  const cols = Math.max(1, Math.min(total, Math.ceil(Math.sqrt(total * ratio))));
-  const rows = Math.max(1, Math.ceil(total / cols));
-  return { cols, rows };
+  const call = document.querySelector(".call-window:not(.collapsed)");
+  const paneWidth = call?.clientWidth || pane.clientWidth || window.innerWidth;
+  const paneHeight = call?.clientHeight || pane.clientHeight || window.innerHeight;
+  const compact = paneWidth <= 760 || paneHeight <= 620;
+  const gap = compact ? 7 : 14;
+  const stageWidth = Math.max(1, paneWidth - (compact ? 14 : 28));
+  const stageHeight = Math.max(1, paneHeight - (compact ? 78 : 158));
+
+  const portrait = stageHeight > stageWidth * 1.25;
+  const minimumCols = portrait && total >= 7 ? 3 : portrait && total >= 3 ? 2 : 1;
+  let best = {
+    cols: 1,
+    rows: total,
+    tileSide: Math.min(stageWidth, stageHeight / total),
+    score: -Infinity
+  };
+  for (let cols = minimumCols; cols <= total; cols += 1) {
+    const rows = Math.ceil(total / cols);
+    const cellWidth = (stageWidth - gap * (cols - 1)) / cols;
+    const cellHeight = (stageHeight - gap * (rows - 1)) / rows;
+    if (cellWidth <= 0 || cellHeight <= 0) continue;
+    const tileSide = Math.min(cellWidth, cellHeight);
+    const emptySlots = cols * rows - total;
+    const score = tileSide * tileSide * total - emptySlots * tileSide * tileSide * 0.18;
+    if (score > best.score) best = { cols, rows, tileSide, score };
+  }
+  return {
+    cols: best.cols,
+    rows: best.rows,
+    tileSize: Math.max(1, Math.floor(best.tileSide))
+  };
 }
 
 function callParticipants() {
@@ -1328,7 +1351,9 @@ function renderVoiceStage() {
   if (dominant) {
     const secondaryShares = shares.filter((share) => share.id !== dominant.id);
     const stripCount = Math.max(1, participants.length + secondaryShares.length);
-    const compactRows = window.matchMedia("(max-width: 820px)").matches && stripCount > 4
+    const callWidth = document.querySelector(".call-window:not(.collapsed)")?.clientWidth || window.innerWidth;
+    const compactStage = callWidth <= 720 || window.innerHeight <= 620;
+    const compactRows = compactStage && stripCount > 4
       ? 2
       : stripCount > 8
         ? 2
@@ -1365,7 +1390,8 @@ function renderVoiceStage() {
   return `
     <section class="voice-stage participants-only">
       <div class="video-grid participant-grid ${hasFocus ? "has-focus" : ""}"
-        style="--video-cols:${layout.cols}; --video-rows:${layout.rows}; --participant-count:${participants.length};">
+        data-participant-count="${participants.length}"
+        style="--video-cols:${layout.cols}; --video-rows:${layout.rows}; --tile-size:${layout.tileSize}px; --participant-count:${participants.length};">
         ${participants.map((entry) => renderVideoTile(entry.id, entry.user, entry.media, {
           source: "camera"
         })).join("")}
@@ -2376,13 +2402,45 @@ document.addEventListener("click", (event) => {
   if (event.target.closest("[data-close-modal], .modal-close")) closeModal();
 });
 
-window.addEventListener("resize", () => {
-  const mobileLayout = window.matchMedia("(max-width: 820px), (pointer: coarse) and (max-width: 1024px)").matches;
+function syncViewportHeight() {
+  const height = window.visualViewport?.height || window.innerHeight;
+  document.documentElement.style.setProperty("--viewport-height", `${Math.round(height)}px`);
+}
+
+function refreshCallLayout() {
+  const grid = document.querySelector(".participant-grid[data-participant-count]");
+  if (grid) {
+    const count = Math.max(1, Number(grid.dataset.participantCount) || 1);
+    const layout = videoGridLayout(count);
+    grid.style.setProperty("--video-cols", String(layout.cols));
+    grid.style.setProperty("--video-rows", String(layout.rows));
+    grid.style.setProperty("--tile-size", `${layout.tileSize}px`);
+  }
+
+  const strip = document.querySelector(".participant-strip");
+  if (strip) {
+    const count = Math.max(1, strip.children.length);
+    const callWidth = document.querySelector(".call-window:not(.collapsed)")?.clientWidth || window.innerWidth;
+    const compactStage = callWidth <= 720 || window.innerHeight <= 620;
+    const rows = compactStage && count > 4 ? 2 : count > 8 ? 2 : 1;
+    strip.style.setProperty("--strip-count", String(count));
+    strip.style.setProperty("--strip-rows", String(rows));
+    strip.style.setProperty("--strip-cols", String(Math.ceil(count / rows)));
+  }
+}
+
+function handleLayoutResize() {
+  syncViewportHeight();
+  const mobileLayout = window.matchMedia("(max-width: 900px), (pointer: coarse) and (max-width: 1024px)").matches;
   if (!mobileLayout && state.mobileChannelsOpen) setMobileChannelsOpen(false);
   if (!state.voice.channelId || state.callCollapsed) return;
   clearTimeout(state.resizeRender);
-  state.resizeRender = setTimeout(render, 120);
-});
+  state.resizeRender = setTimeout(refreshCallLayout, 80);
+}
+
+syncViewportHeight();
+window.addEventListener("resize", handleLayoutResize);
+window.visualViewport?.addEventListener("resize", handleLayoutResize);
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && state.mobileChannelsOpen) setMobileChannelsOpen(false);
