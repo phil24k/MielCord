@@ -1400,20 +1400,36 @@ function renderVoiceStage() {
   `;
 }
 
+function avatarImageUrl(person, size = 256) {
+  const value = String(person?.avatar_url || "");
+  if (!value) return "";
+  try {
+    const url = new URL(value, window.location.origin);
+    if (url.hostname === "gravatar.com" || url.hostname.endsWith(".gravatar.com")) {
+      url.searchParams.set("s", String(Math.max(64, Math.min(2048, size))));
+    }
+    return url.href;
+  } catch {
+    return value;
+  }
+}
+
 function renderAvatar(person, classes = "") {
   const name = person.display_name || person.username || "?";
-  const url = person.avatar_url || "";
+  const url = avatarImageUrl(person, 256);
   return `
     <div class="avatar ${classes}" style="--avatar:${escapeHtml(person.avatar_color || "#d99a23")}">
-      ${url ? `<img src="${escapeHtml(url)}" alt="">` : initials(name)}
+      ${url ? `<img src="${escapeHtml(url)}" alt="" decoding="async">` : initials(name)}
     </div>
   `;
 }
 
 function renderAvatarFallback(person) {
   const name = person.display_name || person.username || "?";
-  const url = person.avatar_url || "";
-  return url ? `<img src="${escapeHtml(url)}" alt="">` : initials(name);
+  const url = avatarImageUrl(person, 512);
+  return url
+    ? `<img class="call-avatar-image" src="${escapeHtml(url)}" alt="" decoding="async">`
+    : initials(name);
 }
 
 function renderVideoTile(id, user, media, options = {}) {

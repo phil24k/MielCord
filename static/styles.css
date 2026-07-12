@@ -3819,21 +3819,23 @@ select:focus {
   user-select: none;
 }
 
-.participant-tile .video-fallback img {
-  width: clamp(64px, 34%, 156px);
-  height: auto;
-  max-width: 62%;
-  max-height: 58%;
+.participant-tile .video-fallback > .call-avatar-image {
+  width: clamp(48px, 24%, 132px) !important;
+  height: auto !important;
+  max-width: 68% !important;
+  max-height: 58% !important;
   aspect-ratio: 1;
+  border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 8px;
-  object-fit: contain;
+  object-fit: contain !important;
+  image-rendering: auto;
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.3);
 }
 
-.participant-strip .participant-tile .video-fallback img {
-  width: min(44%, 64px);
-  max-width: 64px;
-  max-height: 64%;
+.participant-strip .participant-tile .video-fallback > .call-avatar-image {
+  width: min(50%, 56px) !important;
+  max-width: 56px !important;
+  max-height: 64% !important;
 }
 
 .stream-tile .video-fallback img {
@@ -4327,8 +4329,8 @@ select:focus {
     height: 36px;
   }
 
-  .participant-tile .video-fallback img {
-    width: clamp(48px, 34%, 92px);
+  .participant-tile .video-fallback > .call-avatar-image {
+    width: clamp(42px, 24%, 88px) !important;
   }
 }
 
